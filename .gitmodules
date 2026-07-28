@@ -1,0 +1,3 @@
+[submodule "vendor/ttt-e2e"]
+	path = vendor/ttt-e2e
+	url = https://github.com/test-time-training/e2e

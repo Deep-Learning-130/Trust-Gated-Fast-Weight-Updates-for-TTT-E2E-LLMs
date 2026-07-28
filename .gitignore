@@ -1,0 +1,29 @@
+# Checkpoints -- large, requester-pays, never in git
+checkpoints/
+*.msgpack
+*.orbax-checkpoint*
+*.npy
+
+# Experiment outputs
+outputs/
+experiments/*/results/
+experiments/*/runs/
+wandb/
+*.jsonl
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Env / secrets (GCP billing project id, etc.)
+.env
+*.local
+
+# OS
+.DS_Store
+Thumbs.db
