@@ -1,0 +1,252 @@
+{
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\scripts\\fetch_checkpoints.sh": {
+    "mtime": 1785258478.8471065,
+    "ast_hash": "ccf440ce480de9b093f228a9db8e457a",
+    "semantic_hash": "ccf440ce480de9b093f228a9db8e457a"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\scripts\\pre-push-guard.sh": {
+    "mtime": 1785258512.7736745,
+    "ast_hash": "554a11168bac791acfa196afabc6626a",
+    "semantic_hash": "554a11168bac791acfa196afabc6626a"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\scripts\\setup_vendor.sh": {
+    "mtime": 1785258472.250624,
+    "ast_hash": "3b354df6b5f0719270daba3b431b0dda",
+    "semantic_hash": "3b354df6b5f0719270daba3b431b0dda"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\__init__.py": {
+    "mtime": 1785257916.6421473,
+    "ast_hash": "58f9087ad1dba02b32f01ffe3eafd46a",
+    "semantic_hash": "58f9087ad1dba02b32f01ffe3eafd46a"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\attack\\__init__.py": {
+    "mtime": 1785258075.7705824,
+    "ast_hash": "d6f6e246db2bc94d69aaf2a5f3208d15",
+    "semantic_hash": "d6f6e246db2bc94d69aaf2a5f3208d15"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\attack\\craft.py": {
+    "mtime": 1785258072.7687225,
+    "ast_hash": "7af2070a2443dce7121c9e779dcf03ad",
+    "semantic_hash": "7af2070a2443dce7121c9e779dcf03ad"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\attack\\objectives.py": {
+    "mtime": 1785257941.7394109,
+    "ast_hash": "dec98857e9f1f745b8e03382722c0a65",
+    "semantic_hash": "dec98857e9f1f745b8e03382722c0a65"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\attack\\stream.py": {
+    "mtime": 1785257955.2518437,
+    "ast_hash": "76e5f01a47be85aa711873bfac855a32",
+    "semantic_hash": "76e5f01a47be85aa711873bfac855a32"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\audit\\__init__.py": {
+    "mtime": 1785258081.6503155,
+    "ast_hash": "f138d98417d963fec9f66fe07303ea79",
+    "semantic_hash": "f138d98417d963fec9f66fe07303ea79"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\audit\\log.py": {
+    "mtime": 1785257900.518111,
+    "ast_hash": "c07c8dae0a774c28f2482cbcb445f706",
+    "semantic_hash": "c07c8dae0a774c28f2482cbcb445f706"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\baselines\\__init__.py": {
+    "mtime": 1785258080.2807567,
+    "ast_hash": "01cefeb626951579d44629fc0c38ad9b",
+    "semantic_hash": "01cefeb626951579d44629fc0c38ad9b"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\baselines\\medbn_analogue.py": {
+    "mtime": 1785257887.9964583,
+    "ast_hash": "8409b878800d18fff34f9786563dbe3e",
+    "semantic_hash": "8409b878800d18fff34f9786563dbe3e"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\drift\\__init__.py": {
+    "mtime": 1785257919.958658,
+    "ast_hash": "3e2b38975c12ca002ac1eefbfbb340f6",
+    "semantic_hash": "3e2b38975c12ca002ac1eefbfbb340f6"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\drift\\accumulator.py": {
+    "mtime": 1785257805.8677235,
+    "ast_hash": "3956d79b3f035e705ef955646402f725",
+    "semantic_hash": "3956d79b3f035e705ef955646402f725"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\eval\\__init__.py": {
+    "mtime": 1785258077.77942,
+    "ast_hash": "1354a9fa34d66b754d8490a7537b37ef",
+    "semantic_hash": "1354a9fa34d66b754d8490a7537b37ef"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\eval\\harness.py": {
+    "mtime": 1785258008.7180276,
+    "ast_hash": "31c583cf505abb1a24f91ef42f3afa92",
+    "semantic_hash": "31c583cf505abb1a24f91ef42f3afa92"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\eval\\metrics.py": {
+    "mtime": 1785257986.5318754,
+    "ast_hash": "33dba30b743c9f824a70f8472ac15b76",
+    "semantic_hash": "33dba30b743c9f824a70f8472ac15b76"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\eval\\report.py": {
+    "mtime": 1785258020.525212,
+    "ast_hash": "1090fe2b7c674fbfe59397400b9b6f8f",
+    "semantic_hash": "1090fe2b7c674fbfe59397400b9b6f8f"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\gate\\__init__.py": {
+    "mtime": 1785257918.139443,
+    "ast_hash": "048f5f8a9beca864578e190a69f71fd0",
+    "semantic_hash": "048f5f8a9beca864578e190a69f71fd0"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\gate\\anchor.py": {
+    "mtime": 1785257848.7643783,
+    "ast_hash": "e08571736c03ccf1a0a0623cbed85433",
+    "semantic_hash": "e08571736c03ccf1a0a0623cbed85433"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\gate\\influence.py": {
+    "mtime": 1785257864.2855608,
+    "ast_hash": "182da5ff37b5abe927c28747c0ea705f",
+    "semantic_hash": "182da5ff37b5abe927c28747c0ea705f"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\gate\\policy.py": {
+    "mtime": 1785257871.2080808,
+    "ast_hash": "f84f04d17af150c59dbb8b3dae43f400",
+    "semantic_hash": "f84f04d17af150c59dbb8b3dae43f400"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\gate\\uncertainty.py": {
+    "mtime": 1785257857.2300322,
+    "ast_hash": "351cac2a7b76d654b7c11c55209922ed",
+    "semantic_hash": "351cac2a7b76d654b7c11c55209922ed"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\interceptor.py": {
+    "mtime": 1785257750.4263694,
+    "ast_hash": "9699e7454a7bd21ef71d187b8ca32aee",
+    "semantic_hash": "9699e7454a7bd21ef71d187b8ca32aee"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\probes\\__init__.py": {
+    "mtime": 1785258078.8180118,
+    "ast_hash": "83c7469ffd33528a826656f26bce5cce",
+    "semantic_hash": "83c7469ffd33528a826656f26bce5cce"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\probes\\rotating.py": {
+    "mtime": 1785257912.886019,
+    "ast_hash": "ac2b6d5589d8af6547321db65efd8337",
+    "semantic_hash": "ac2b6d5589d8af6547321db65efd8337"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\store\\__init__.py": {
+    "mtime": 1785257921.4264054,
+    "ast_hash": "0acc2dc5d8f80c733634495a011e19c4",
+    "semantic_hash": "0acc2dc5d8f80c733634495a011e19c4"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\store\\versioned.py": {
+    "mtime": 1785257824.365759,
+    "ast_hash": "a002718b3a1c3cca172944b61f7caa27",
+    "semantic_hash": "a002718b3a1c3cca172944b61f7caa27"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\tree_ops.py": {
+    "mtime": 1785257707.9829757,
+    "ast_hash": "2a1a5f0429b9917104d63fd7dfbb01c9",
+    "semantic_hash": "2a1a5f0429b9917104d63fd7dfbb01c9"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\types.py": {
+    "mtime": 1785257696.7976663,
+    "ast_hash": "b3912c79ad7d9d49aaca93a7db38fe75",
+    "semantic_hash": "b3912c79ad7d9d49aaca93a7db38fe75"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\src\\trustgate\\vendor_patch.py": {
+    "mtime": 1785257777.861382,
+    "ast_hash": "e39c3a674a9bdfef8aac9dd77261abd5",
+    "semantic_hash": "e39c3a674a9bdfef8aac9dd77261abd5"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\tests\\conftest.py": {
+    "mtime": 1785258108.328935,
+    "ast_hash": "57e66db44083bc82d36654d86b183d59",
+    "semantic_hash": "57e66db44083bc82d36654d86b183d59"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\tests\\test_accumulator.py": {
+    "mtime": 1785258124.0358646,
+    "ast_hash": "35ae27c9260a6b697bd44e45411465a6",
+    "semantic_hash": "35ae27c9260a6b697bd44e45411465a6"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\tests\\test_interceptor.py": {
+    "mtime": 1785258266.0367692,
+    "ast_hash": "890f18ef03521ea6334d4067eb43a6d1",
+    "semantic_hash": "890f18ef03521ea6334d4067eb43a6d1"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\tests\\test_metrics.py": {
+    "mtime": 1785258146.8155172,
+    "ast_hash": "bb5a799d805ef9d45fe64ecbf98dad99",
+    "semantic_hash": "bb5a799d805ef9d45fe64ecbf98dad99"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\tests\\test_store.py": {
+    "mtime": 1785258137.1987412,
+    "ast_hash": "88a5e9f97c16abc9482bf656c3a4d125",
+    "semantic_hash": "88a5e9f97c16abc9482bf656c3a4d125"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\tests\\test_tree_ops.py": {
+    "mtime": 1785258274.581994,
+    "ast_hash": "aab5cdde496790ed9c41f4ab8cf6b99e",
+    "semantic_hash": "aab5cdde496790ed9c41f4ab8cf6b99e"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\DISCLOSURE.md": {
+    "mtime": 1785257587.3859775,
+    "ast_hash": "d9c2265364b30d96109eef5f9392feb1",
+    "semantic_hash": "d9c2265364b30d96109eef5f9392feb1"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\README.md": {
+    "mtime": 1785258501.907044,
+    "ast_hash": "04cca1bcda8cfebf6e5e676d2a8dc458",
+    "semantic_hash": "04cca1bcda8cfebf6e5e676d2a8dc458"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\docs\\F1-trust-gated-ttt.md": {
+    "mtime": 1785256757.2737901,
+    "ast_hash": "f7b202e791f1a0cba0d0b0933f00e4f9",
+    "semantic_hash": "f7b202e791f1a0cba0d0b0933f00e4f9"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\docs\\adr\\ADR-002-overlay-vs-fork.md": {
+    "mtime": 1785258330.8576367,
+    "ast_hash": "132112b8bc1a9c8178e3bc5b3b979e58",
+    "semantic_hash": "132112b8bc1a9c8178e3bc5b3b979e58"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\docs\\adr\\ADR-003-jax-interceptor-shape.md": {
+    "mtime": 1785258345.753194,
+    "ast_hash": "e667eb8119d1fcde163aec5e322b2516",
+    "semantic_hash": "e667eb8119d1fcde163aec5e322b2516"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\docs\\adr\\ADR-F1-gate-signal.md": {
+    "mtime": 1785258364.2931643,
+    "ast_hash": "7f2fa5932132309826b0f3e3b4c1657d",
+    "semantic_hash": "7f2fa5932132309826b0f3e3b4c1657d"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\docs\\patent\\invention-disclosure.md": {
+    "mtime": 1785258409.6592867,
+    "ast_hash": "1d403a2bfe7f42070c15afd5a9dbc362",
+    "semantic_hash": "1d403a2bfe7f42070c15afd5a9dbc362"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\docs\\patent\\prior-art\\attack-prior-art.md": {
+    "mtime": 1785258416.7229822,
+    "ast_hash": "5222155adc4adc1be748adb061d248ec",
+    "semantic_hash": "5222155adc4adc1be748adb061d248ec"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\docs\\patent\\prior-art\\medbn-diff.md": {
+    "mtime": 1785258381.0274954,
+    "ast_hash": "147795b148a66e76dda62fd171316c78",
+    "semantic_hash": "147795b148a66e76dda62fd171316c78"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\docs\\patent\\prior-art\\robust-tta-survey.md": {
+    "mtime": 1785258422.6285508,
+    "ast_hash": "52b4909733f5b5c18ba9be146f5e91db",
+    "semantic_hash": "52b4909733f5b5c18ba9be146f5e91db"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\experiments\\000-repro-baseline\\README.md": {
+    "mtime": 1785258461.0284233,
+    "ast_hash": "0ed92b4cc9f7a2f8eed159bbed175c6a",
+    "semantic_hash": "0ed92b4cc9f7a2f8eed159bbed175c6a"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\experiments\\001-attack-spike\\PREREGISTERED.md": {
+    "mtime": 1785258446.8843133,
+    "ast_hash": "594a5ffb3bf675f38dbb4cdf832cf1e9",
+    "semantic_hash": "594a5ffb3bf675f38dbb4cdf832cf1e9"
+  },
+  "C:\\Users\\manas\\Desktop\\Projects\\TTT\\experiments\\001-attack-spike\\README.md": {
+    "mtime": 1785258453.9098785,
+    "ast_hash": "6945d6ac3b47628789fad7fcd85e9708",
+    "semantic_hash": "6945d6ac3b47628789fad7fcd85e9708"
+  }
+}
