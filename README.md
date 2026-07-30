@@ -1,77 +1,161 @@
-# F1 — Trust-Gated Fast-Weight Updates for TTT-E2E LLMs
+<div align="center">
 
-> ⚠ **CONFIDENTIAL.** Provisional patent not yet filed. **Read [`DISCLOSURE.md`](DISCLOSURE.md)
-> before pushing, publishing, or presenting.** No public disclosure until filed —
-> it forfeits foreign patent rights.
+# Trust-Gated Fast-Weight Updates for TTT-E2E LLMs
 
-A defense for language models that learn while they serve. [TTT-E2E](https://arxiv.org/abs/2512.23675)
-updates "fast weights" at inference to compress long context; a model that learns
-while it serves can be **poisoned** while it serves. This project builds a **trust
-gate** that admits a fast-weight update only if it passes a frozen-anchor
-consistency check, under a **bounded cumulative-drift budget** with
-**checkpoint/rollback**.
+**A runtime defense for language models that learn while they serve.**
 
-Full rationale: [`docs/F1-trust-gated-ttt.md`](docs/F1-trust-gated-ttt.md).
+`Phase 0–1 scaffold` · `JAX / Equinox` · `31 CPU tests passing` · `patent-pending — confidential`
 
-## Status
+</div>
 
-**Phase 0–1 scaffold.** The kill-gate (does the attack even work?) is not yet run.
+> [!WARNING]
+> **CONFIDENTIAL — provisional patent not yet filed.** This is a **private** repository.
+> Do not fork publicly, mirror, present, or otherwise disclose the gate mechanism.
+> Public disclosure before filing forfeits foreign patent rights (absolute-novelty
+> jurisdictions have no grace period). See [`DISCLOSURE.md`](DISCLOSURE.md).
 
-| Component | State |
-|---|---|
-| Update interceptor + tree ops | ✅ implemented, CPU-tested |
-| Drift accumulator (bounded-drift latch) | ✅ implemented, CPU-tested |
-| Versioned store (O(1) rollback) | ✅ implemented, CPU-tested |
-| Corruption metrics / audit log | ✅ implemented, CPU-tested |
-| Attack (`attack/`) + harness | ⏳ specified; model steps blocked on checkpoints |
-| Gate signals A/B/C, MedBN-analogue baseline | ⛔ Phase 2 — blocked on the Phase 1 result |
+---
 
-31 CPU tests pass with no GPU and no checkpoints.
+## Overview
+
+[TTT-E2E](https://arxiv.org/abs/2512.23675) reframes long-context language modeling as
+*continual learning at inference*: the model carries **fast weights** that it updates by
+next-token prediction as it reads the context, compressing that context into weights at
+near-RNN cost while matching full-attention scaling.
+
+The security consequence is direct: **a model that learns while it serves can be poisoned
+while it serves.** A slow, benign-looking input stream — not a single adversarial token —
+can steer the fast-weight updates so that *later, unrelated* benign inputs are handled
+worse, or so that a latent trigger is implanted, all without ever touching the base
+(slow) weights.
+
+This project builds the **defense**: a **trust gate** that intercepts every proposed
+fast-weight update and admits it only if it passes a consistency check against a frozen
+anchor, subject to a **bounded cumulative-drift budget**, backed by **checkpoint and
+rollback**. The defensible core is the *system* — interceptor + drift budget + rollback —
+and its headline property is a **provable per-window drift bound**.
+
+Full technical rationale and prior-art analysis: [`docs/F1-trust-gated-ttt.md`](docs/F1-trust-gated-ttt.md).
 
 ## Architecture
 
-An **overlay** on the vendored TTT-E2E repo — we never edit it (no licence; see
-[`ADR-002`](docs/adr/ADR-002-overlay-vs-fork.md)). `src/trustgate/` imports and
-wraps `vendor/ttt-e2e/`. The interceptor monkeypatches the one vendor commit point
-(`MetaModel.inner_loop_step`); see [`ADR-003`](docs/adr/ADR-003-jax-interceptor-shape.md).
+An **overlay**, not a fork. The upstream TTT-E2E code ships without a license, so it is
+vendored as a **read-only pinned submodule** and never edited; all of our work lives in a
+separate package that imports and wraps it. The interceptor hooks the single point where a
+fast-weight update commits (`MetaModel.inner_loop_step`) via a confined, reversible
+monkeypatch. Rationale: [`ADR-002`](docs/adr/ADR-002-overlay-vs-fork.md),
+[`ADR-003`](docs/adr/ADR-003-jax-interceptor-shape.md).
 
 ```
-context ──▶ fast-weight updater ──Δθ──▶ [ TRUST GATE ] ──commit──▶ versioned store
-  (vendor)          (vendor)          anchor-consistency + uncertainty   (ours, O(1) rollback)
-                                              │ drift delta
-                                              ▼
-                                      drift accumulator (budget ε, breach latches)
-                                              │ breach → rollback
-                                              ▼
-                                      last trusted checkpoint
+                          proposed Δθ
+   context ──▶ fast-weight ──────────▶ ┌───────────────────────────┐ ──commit──▶ versioned
+   stream      updater                 │        TRUST GATE         │             store
+   (vendor)    (vendor)                │  anchor-consistency (A)   │           (O(1) rollback)
+                    ▲                   │  update-uncertainty (B)   │                 │
+                    │                   └─────────────┬─────────────┘                 │
+                    │                                 │ drift delta                   │
+                    │                     ┌───────────▼───────────┐                   │
+       rolled-back state                 │   drift accumulator    │  breach ──────────┘
+                    └─────────────────────│  (budget ε, latches)   │  → rollback to
+                                          └────────────────────────┘    last trusted checkpoint
 ```
 
-## Layout
+Because JAX fast-weight updates are pure functions over a pytree, **reject** is a
+`jnp.where` select between weight trees and **rollback** is a reference swap — genuinely
+O(1), with no mutable state to unwind.
 
-- `src/trustgate/` — the overlay package (interceptor, gate, drift, store, attack, eval, audit)
-- `vendor/ttt-e2e/` — pinned submodule, **read-only**
-- `docs/` — dossier, ADRs, patent disclosure + prior-art diffs
-- `experiments/` — `000` baseline repro (gate), `001` attack spike (kill-gate, **pre-registered**)
-- `tests/` — CPU-only, no GPU
+## Repository layout
 
-## Quick start (CPU tests)
+```
+src/trustgate/
+├─ interceptor.py      ★ enforcement point — wraps the vendor update fn
+├─ vendor_patch.py       install/uninstall the gate into the read-only submodule
+├─ tree_ops.py           jit-safe pytree arithmetic over fast weights
+├─ types.py              GateDecision, DriftState, Verdict (all trace-safe)
+├─ gate/                 anchor (A) · uncertainty (B) · influence (C) · policy   [Phase 2]
+├─ drift/accumulator.py  cumulative-drift budget ε — the bounded-drift guarantee
+├─ store/versioned.py    ring-buffered checkpoints, O(1) rollback
+├─ probes/               rotating held-out probe sets                            [Phase 2]
+├─ baselines/            MedBN-analogue robust-aggregation baseline              [Phase 2]
+├─ attack/               crafted-stream poisoning (Phase 1 kill-gate adversary)
+├─ eval/                 corruption metrics · harness · go/no-go report
+└─ audit/                accept/reject/rollback trail
+
+vendor/ttt-e2e/          pinned submodule — READ-ONLY, unlicensed, never edited
+docs/                    dossier · ADRs · patent disclosure + prior-art diffs
+experiments/             000 baseline repro (gate) · 001 attack spike (pre-registered)
+tests/                   CPU-only, no GPU, no checkpoints
+scripts/                 vendor setup · checkpoint fetch · pre-push guard
+graphify-out/            knowledge graph of this repo (graph.html, GRAPH_REPORT.md)
+```
+
+## Status
+
+**Phase 0–1 scaffold.** The Phase 1 kill-gate — *does a benign-looking stream actually
+corrupt fast weights?* — has not yet been run.
+
+| Component | State |
+|---|---|
+| Update interceptor + pytree ops | ✅ implemented · CPU-tested |
+| Drift accumulator (latching bounded-drift budget) | ✅ implemented · CPU-tested |
+| Versioned store (O(1) rollback) | ✅ implemented · CPU-tested |
+| Corruption metrics · audit log | ✅ implemented · CPU-tested |
+| Attack (`attack/`) + evaluation harness | 🚧 specified — model steps blocked on checkpoints |
+| Gate signals A/B/C · MedBN-analogue baseline | ⛔ Phase 2 — gated on the Phase 1 result |
+
+## Quick start
+
+CPU tests need no GPU and no checkpoints:
 
 ```bash
-uv venv .venv && uv pip install --python .venv jax equinox optax numpy pytest
+uv venv .venv
+uv pip install --python .venv jax equinox optax numpy pytest
 PYTHONPATH=src JAX_PLATFORMS=cpu .venv/bin/python -m pytest
 ```
+
+Expected: **31 passing**. The suite verifies the interceptor's accept/reject/no-op
+semantics, the store's round-trip and rollback, the drift latch, and the corruption
+metrics — the parts of the invention that do not require a model.
 
 ## GPU path (Phase 0.5+)
 
 ```bash
-bash scripts/setup_vendor.sh                         # submodule at pinned SHA
+bash scripts/setup_vendor.sh                          # init submodule at the pinned SHA
 GCP_BILLING_PROJECT=<proj> TTT_BUCKET=<gs://...> \
-    bash scripts/fetch_checkpoints.sh                # 1B, requester-pays
-# then experiments/000-repro-baseline (gate), then 001-attack-spike
+    bash scripts/fetch_checkpoints.sh                 # 1B checkpoint (GCS requester-pays)
+# then: experiments/000-repro-baseline  (must reproduce vendor numbers — a gate)
+#       experiments/001-attack-spike    (the pre-registered kill-gate)
 ```
 
 ## The one rule that governs everything
 
-Phase 1 is a **hard kill-gate** ([`experiments/001-attack-spike/PREREGISTERED.md`](experiments/001-attack-spike/PREREGISTERED.md)).
-If no benign-looking stream measurably corrupts fast weights against the
-pre-registered threshold, **the project stops.** No attack ⇒ no defense.
+Phase 1 is a **hard kill-gate**, and its criterion is
+[pre-registered](experiments/001-attack-spike/PREREGISTERED.md) — thresholds fixed *before*
+any result is seen. If no benign-looking stream measurably corrupts fast weights against
+that threshold, **the project stops.** No demonstrated attack means there is no defense to
+build. This discipline is the point, not an obstacle.
+
+## Development roadmap
+
+1. **Phase 0.5 — Baseline.** Reproduce published TTT-E2E numbers on our hardware. *(gate)*
+2. **Phase 1 — Attack spike.** Demonstrate (or refute) benign-stream fast-weight poisoning
+   against the pre-registered threshold. *(kill-gate)*
+3. **Phase 2 — Gate prototype.** Implement anchor-consistency + uncertainty signals; sweep
+   the operating-point curve; beat the MedBN-analogue baseline.
+4. **Filing gate.** Complete the [line-level MedBN diff](docs/patent/prior-art/medbn-diff.md);
+   file only if the gate beats the baseline *and* the novelty diff is clean.
+
+## References
+
+- **TTT-E2E** — End-to-End Test-Time Training for Long Context — [arXiv:2512.23675](https://arxiv.org/abs/2512.23675)
+- **MedBN** — Robust Test-Time Adaptation against Malicious Samples (defense prior art) — [arXiv:2403.19326](https://arxiv.org/abs/2403.19326)
+- Test-Time Poisoning Attacks Against TTA — [arXiv:2308.08505](https://arxiv.org/abs/2308.08505)
+- Realistic Test-Time Data Poisoning — [arXiv:2410.04682](https://arxiv.org/abs/2410.04682)
+- R.I.P. — black-box attack on continual TTA — [arXiv:2412.01154](https://arxiv.org/abs/2412.01154)
+
+---
+
+<div align="center">
+<sub>Research-novelty + design dossier — not a freedom-to-operate opinion.
+A formal FTO search (especially vs. MedBN) is required before filing.</sub>
+</div>
