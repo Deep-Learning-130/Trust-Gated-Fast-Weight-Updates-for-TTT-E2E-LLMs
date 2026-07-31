@@ -24,6 +24,10 @@ venv/
 .env
 *.local
 
+# Local working docs (not part of the tracked tree)
+ROADMAP.md
+HANDOFF.md
+
 # OS
 .DS_Store
 Thumbs.db
