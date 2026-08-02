@@ -27,6 +27,7 @@ venv/
 # Local working docs (not part of the tracked tree)
 ROADMAP.md
 HANDOFF.md
+TEAM_PLAN.md
 
 # OS
 .DS_Store
