@@ -48,3 +48,22 @@ at SHA `a4fc478`:
 - Tightly coupled to the vendor call-site shape; the test suite is the tripwire.
 - The bounded-drift guarantee is enforceable inside the scan because the drift
   accumulator (`drift/accumulator.py`) is carried through the same `scan` carry.
+
+## Correction — 2026-08-08
+
+**The last consequence above is aspirational, not implemented.** `drift/accumulator.py`
+and `store/versioned.py` exist and are unit-tested, but `interceptor.py` never touches
+either: it calls `gate(delta, current)` and returns metrics. Today there is no enforced
+budget and no rollback path.
+
+Carrying them is blocked by a structural fact, not by effort. The vendor's scan carry is
+fixed at `(model, inner_opt_state, (state_all, state_suffix))` inside `loss_for_sequence`,
+and a `scan` requires the carry structure out to match the structure in — so the wrapper
+cannot append a fourth slot without editing vendor code, which ADR-002 forbids. Three ways
+out are on the table (optimizer-transformation wrapper, `eqx.tree_at` pytree smuggling, or
+per-sequence granularity), and they do not buy the same guarantee: the third weakens the
+claim from per-window to per-sequence.
+
+That decision gets its own ADR before any code is written — TEAM_PLAN task **P3-1**,
+gated on a Phase 2 PROCEED. Until it lands, treat the bounded-drift property as designed
+but unproven, and do not describe it as enforced in the invention disclosure.
