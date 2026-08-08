@@ -4,15 +4,18 @@
 
 **A runtime defense for language models that learn while they serve.**
 
-`Phase 0–1 scaffold` · `JAX / Equinox` · `31 CPU tests passing` · `patent-pending — confidential`
+`Phase 0–1 scaffold` · `JAX / Equinox` · `31 CPU tests passing` · `public since 2026-08-01`
 
 </div>
 
-> [!WARNING]
-> **CONFIDENTIAL — provisional patent not yet filed.** This is a **private** repository.
-> Do not fork publicly, mirror, present, or otherwise disclose the gate mechanism.
-> Public disclosure before filing forfeits foreign patent rights (absolute-novelty
-> jurisdictions have no grace period). See [`DISCLOSURE.md`](DISCLOSURE.md).
+> [!NOTE]
+> **Public repository. No patent filed.** Public since 2026-08-01, and since 2026-08-02 that
+> is a deliberate posture rather than an incident — so **nobody should change the
+> visibility**. Foreign rights in absolute-novelty jurisdictions (EPO/CN/JP/KR) are forfeit;
+> the US grace period runs to roughly **2027-08-01**, which is now a real deadline rather
+> than a backstop. Pushing to a **new** remote is still a separate decision, and working
+> attack artifacts still wait on coordinated disclosure to the TTT-E2E authors.
+> Full posture and the open questions for counsel: [`DISCLOSURE.md`](DISCLOSURE.md).
 
 ---
 
@@ -120,12 +123,19 @@ metrics — the parts of the invention that do not require a model.
 ## GPU path (Phase 0.5+)
 
 ```bash
-bash scripts/setup_vendor.sh                          # init submodule at the pinned SHA
-GCP_BILLING_PROJECT=<proj> TTT_BUCKET=<gs://...> \
-    bash scripts/fetch_checkpoints.sh                 # 1B checkpoint (GCS requester-pays)
+export GCP_BILLING_PROJECT=<proj> WANDB_ENTITY=<e> WANDB_PROJECT=<p> WANDB_KEY=<k>
+
+PROBE_ONLY=1 bash scripts/fetch_checkpoints.sh   # metadata-only: byte count before any egress
+bash scripts/bootstrap_gpu_box.sh                # submodule → env → checkpoint → dataset → command
 # then: experiments/000-repro-baseline  (must reproduce vendor numbers — a gate)
 #       experiments/001-attack-spike    (the pre-registered kill-gate)
 ```
+
+Both GCS buckets are **requester-pays**. The eval dataset must be copied to local disk — the
+vendor's loader has no `gs://` backend. W&B credentials are mandatory and cannot be worked
+around without editing vendor code. Costs, byte counts and the spending cap:
+[`COST_MODEL.md`](experiments/000-repro-baseline/COST_MODEL.md). Exact eval command with
+source citations: [`EVAL_ENTRYPOINT.md`](experiments/000-repro-baseline/EVAL_ENTRYPOINT.md).
 
 ## The one rule that governs everything
 
@@ -137,7 +147,10 @@ build. This discipline is the point, not an obstacle.
 
 ## Development roadmap
 
-1. **Phase 0.5 — Baseline.** Reproduce published TTT-E2E numbers on our hardware. *(gate)*
+1. **Phase 0.5 — Baseline.** Confirm the vendor eval runs soundly on our hardware, against a
+   [pre-registered bar](experiments/000-repro-baseline/TOLERANCE.md). *(gate)* Note this is
+   an environment check, not a reproduction: the paper publishes no number for the released
+   1B checkpoint ([ADR-005](docs/adr/ADR-005-baseline-comparison-basis.md)).
 2. **Phase 1 — Attack spike.** Demonstrate (or refute) benign-stream fast-weight poisoning
    against the pre-registered threshold. *(kill-gate)*
 3. **Phase 2 — Gate prototype.** Implement anchor-consistency + uncertainty signals; sweep

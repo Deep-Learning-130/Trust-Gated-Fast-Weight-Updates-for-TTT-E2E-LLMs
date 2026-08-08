@@ -1,7 +1,7 @@
 [project]
 name = "trustgate"
 version = "0.0.1"
-description = "Trust-gated fast-weight updates for TTT-E2E LLMs (CONFIDENTIAL -- see DISCLOSURE.md)"
+description = "Trust-gated fast-weight updates for TTT-E2E LLMs (public since 2026-08-01 -- see DISCLOSURE.md)"
 requires-python = ">=3.11"
 
 # Overlay package. The heavy JAX/CUDA stack is provided by the vendored
