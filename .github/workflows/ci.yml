@@ -1,0 +1,115 @@
+# CPU test suite. TEAM_PLAN P0-6 / task-allocation T3.1.
+#
+# The suite is the fast feedback loop and must run anywhere, so this job installs
+# no CUDA, fetches no checkpoint and touches no dataset.
+#
+# The vendor submodule is deliberately NOT checked out. It carries no licence
+# (ADR-002) and the CPU tests neither need nor can import it -- `einops`, `zarr`,
+# `grain`, `orbax`, `wandb` and `hydra` are all absent by design, which is why
+# `tests/test_interceptor.py` and `tests/test_carry.py` test against stand-ins
+# for the vendor surface rather than the real `MetaModel`.
+
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  cpu-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the floor declared in pyproject.toml; 3.13 is what the project
+        # is developed on. Bracketing both catches version-specific breakage.
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false # ADR-002 -- unlicensed vendor tree, never fetched here
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Dependencies only -- the project itself is not installed. `PYTHONPATH=src`
+      # is the documented invocation, and installing a second copy into
+      # site-packages would make it ambiguous which `trustgate` was imported.
+      # `eval/prereg.py` resolves PREREGISTERED.md relative to its own __file__,
+      # so importing the wrong copy would break the threshold pin silently.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "jax>=0.4.30" "equinox>=0.11" "optax>=0.2" "numpy>=1.26" "pytest>=8.0"
+
+      - name: Run CPU tests
+        env:
+          PYTHONPATH: src
+          JAX_PLATFORMS: cpu
+        run: python -m pytest -q
+
+  hygiene:
+    # Mechanises review checks 1 and 4 from docs/protocols/branch-and-review.md,
+    # which are described there as non-negotiable but were enforced only by a
+    # human remembering to look.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: No vendor tree contents committed
+        run: |
+          # The submodule pointer is fine; actual files inside it are not.
+          if git ls-files --error-unmatch 'vendor/ttt-e2e/*' >/dev/null 2>&1; then
+            echo "::error::files inside vendor/ttt-e2e are tracked -- ADR-002 forbids editing or vendoring the unlicensed tree"
+            git ls-files 'vendor/ttt-e2e/*'
+            exit 1
+          fi
+          echo "ok: no vendor tree contents tracked"
+
+      - name: No secrets, checkpoints, datasets or results tracked
+        run: |
+          status=0
+          # Patterns that are git-ignored on purpose. Anything here got in via
+          # `git add -f` or a path the ignore rules do not cover.
+          while read -r pattern; do
+            hits=$(git ls-files "$pattern")
+            if [ -n "$hits" ]; then
+              echo "::error::tracked files match forbidden pattern '$pattern':"
+              echo "$hits"
+              status=1
+            fi
+          done <<'PATTERNS'
+          *.npy
+          *.msgpack
+          .env
+          checkpoints/**
+          experiments/*/results/**
+          wandb/**
+          PATTERNS
+          if [ "$status" -eq 0 ]; then echo "ok: nothing forbidden is tracked"; fi
+          exit "$status"
+
+      - name: Phase 2 gate code is absent
+        run: |
+          # Standing Rule 2: no gate/ implementation before the Phase 1 spike
+          # returns PROCEED, because it is sunk cost if the verdict is STOP.
+          # The stubs are expected to remain stubs, so assert they still raise.
+          missing=0
+          for f in src/trustgate/gate/anchor.py src/trustgate/gate/uncertainty.py \
+                   src/trustgate/gate/influence.py src/trustgate/gate/policy.py \
+                   src/trustgate/probes/rotating.py \
+                   src/trustgate/baselines/medbn_analogue.py; do
+            if ! grep -q "NotImplementedError" "$f"; then
+              echo "::error::$f no longer raises NotImplementedError -- gate work before the verdict (Rule 2)"
+              missing=1
+            fi
+          done
+          if [ "$missing" -eq 0 ]; then echo "ok: gate/ is still stubbed"; fi
+          exit "$missing"
