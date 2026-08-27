@@ -2,12 +2,24 @@
 
 **Status: DRAFT SKELETON — not for filing.** Phase 2+. Sections are stubbed to
 attorney-ready structure so the empirical work fills them in as it lands, rather
-than being reconstructed at the end. **CONFIDENTIAL — see `/DISCLOSURE.md`. No
-public disclosure before this is filed.**
+than being reconstructed at the end.
+
+> **Already publicly disclosed.** This repository — including the mechanism described
+> below — has been public since **2026-08-01**, a deliberate posture as of 2026-08-02.
+> Confidentiality is no longer available and must not be claimed here. Rights in
+> absolute-novelty jurisdictions (EPO/CN/JP/KR) are forfeit; the **US grace period runs to
+> approximately 2027-08-01**, which is a filing deadline rather than a backstop. Full
+> posture and the open questions for counsel: [`/DISCLOSURE.md`](../../DISCLOSURE.md).
+>
+> Two things this does *not* change: material covering a **future** invention not yet in
+> the repo still has its full options and should reach counsel before it reaches `main`;
+> and working attack artifacts still wait on coordinated disclosure to the TTT-E2E authors.
 
 **Inventor(s):** TBD
 **Date of conception:** on/around 2026-07-28 (this repo's initial commit; the git
 history is the supporting record — do not rewrite it).
+**Date of first public disclosure:** **2026-08-01** (repository made public). This is the
+date the US grace period runs from — record it with the same care as conception.
 **Reduction to practice:** TBD (Phase 1 attack spike + Phase 2 gate).
 
 ---

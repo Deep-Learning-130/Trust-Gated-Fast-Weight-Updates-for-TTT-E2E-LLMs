@@ -3,8 +3,8 @@
 An overlay package. It never modifies the vendored TTT-E2E tree
 (`vendor/ttt-e2e/`, no licence -- see ADR-002); it imports and wraps it.
 
-Confidential: the provisional patent application is not yet filed. Read
-`DISCLOSURE.md` before pushing, publishing, or presenting any of this.
+Public since 2026-08-01 by decision; no patent has been filed. Read
+`DISCLOSURE.md` before pushing to a remote you have not pushed to before.
 
 Entry point:
 
