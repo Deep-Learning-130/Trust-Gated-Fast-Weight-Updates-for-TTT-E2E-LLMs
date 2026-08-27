@@ -44,17 +44,35 @@ In order. The first four are mechanical and non-negotiable; the rest need judgem
 
 1. **`git -C vendor/ttt-e2e status` is clean.** ADR-002: the vendor tree has no licence and
    must never be edited. Any diff inside `vendor/` blocks the merge outright.
-2. **CPU tests pass:** `PYTHONPATH=src JAX_PLATFORMS=cpu pytest` — currently 31 tests.
-3. **No `gate/` code before Phase 2 returns PROCEED** (Rule 2). Gate work is sunk cost if the
-   verdict is STOP. Attack machinery is fine early; it is needed either way.
+2. **CPU tests pass:** `PYTHONPATH=src JAX_PLATFORMS=cpu pytest` — **165 tests** as of
+   2026-08-27. The count is expected to grow; a branch that *reduces* it is the thing to
+   question, and a branch that changes it without updating this line makes the check a lie.
+3. **No `gate/` code before the Phase 1 spike returns PROCEED** (Rule 2). Gate work is sunk
+   cost if the verdict is STOP. Attack machinery is fine early; it is needed either way.
+   (This previously read "before Phase 2 returns PROCEED", which was muddled — Phase **1**
+   returns the verdict that gates Phase 2.) Note that `interceptor.py` already ships
+   `norm_threshold_gate` as a deliberate Phase 1 sanity control; that is not `gate/` code and
+   is not the invention, but it must stay unwired from the harness and off the CLI.
 4. **No secrets, no checkpoints, no datasets.** `checkpoints/`, `*.npy`, `results/`, `.env`
    are git-ignored — confirm nothing slipped past with `git add -f` or a new path.
 5. **Pre-registered thresholds are untouched** (Rule 5). A diff that moves a bar in
    `PREREGISTERED.md` or `TOLERANCE.md` is rejected unless it is a dated, reasoned revision
    in that file's own revision log. Quiet edits are the specific thing these files exist to
    prevent.
+5b. **A diff to the threshold constants or their parser is reviewed as a threshold change.**
+   `src/trustgate/eval/prereg.py` holds the three frozen bars in code, and its parser maps
+   the doc's table rows onto them. Both are new surfaces on which a bar can move while
+   `PREREGISTERED.md` itself shows a clean diff — so rule 5's check does not cover them.
+   `tests/test_thresholds.py` pins the constants to the document and CI goes red if they
+   diverge, but a reviewer still has to read a change to either file as a change to the bar.
+   Watch specifically for the percent/fraction boundary: the doc says `10%`, the code
+   compares a fraction, and `10.0` instead of `0.10` sets the bar at 1000% and manufactures
+   a STOP from a genuine positive.
 6. **Unflattering numbers are still there** (Rule 6). A result that got worse gets reported,
-   not dropped.
+   not dropped. Concretely: the per-seed table in `report.md` must be present and complete.
+   Aggregates alone can hide a seed where the poison stream *helped* the victim — which is
+   exactly what happened until 2026-08-27, when `render_markdown` was found never to print
+   the per-seed lists `SpikeResult` had been carrying since the scaffold.
 7. **Decisions that are expensive to reverse have an ADR** in `docs/adr/`.
 
 ## Merging
