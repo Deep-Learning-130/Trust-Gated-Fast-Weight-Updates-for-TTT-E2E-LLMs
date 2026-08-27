@@ -32,10 +32,10 @@ answering it *wrongly* have been found and closed.
 
 **Totals:** 3,909 lines under `src/trustgate/`, 2,255 lines of tests,
 **197 tests passing** (186 passed / 11 skipped without the fluency reference
-model fetched, which is what CI sees). 21 commits across 10 feature branches,
-none merged. `NotImplementedError` sites went from 15 to **10**, and 5 of the
-remaining 10 are Phase 2 `gate/` code that is deliberately forbidden until the
-verdict lands.
+model fetched, which is what CI sees). 23 commits across 11 feature branches;
+**nine are now merged to `org/main` via two reviewed PRs**, two await review.
+`NotImplementedError` sites went from 15 to **10**, and 5 of the remaining 10 are
+Phase 2 `gate/` code that is deliberately forbidden until the verdict lands.
 
 ---
 
@@ -295,14 +295,14 @@ and working around it means editing vendor code, which ADR-002 forbids.
 
 **Three things need a person, not code:**
 
-- **A reviewer.** Ten branches, nothing merged. Rule 3 forbids self-merge, and
-  the acknowledgement table in `docs/protocols/branch-and-review.md` is unsigned
-  by all three people — under the protocol as written, nothing is mergeable until
-  someone signs.
+- **Review of the last branch.** `eval/fluency-reference` (T3.2) is the only
+  unmerged work. The first wave was reviewed and merged by someone else during
+  this period, satisfying rule 3.
+- **The acknowledgement table** in `docs/protocols/branch-and-review.md` is still
+  unsigned by all three people, even though merges have now happened against it.
+  Worth closing so the protocol and the practice agree.
 - **Inventorship (T3.9).** `docs/patent/invention-disclosure.md` still reads
   `TBD`.
-- **Merge order.** The branches are chained, so they merge in sequence — and CI
-  is *last*, meaning it does not guard the other nine until the chain lands.
 
 **Remaining code work, in value order:**
 
@@ -325,16 +325,33 @@ and working around it means editing vendor code, which ADR-002 forbids.
 | Remote | Visibility | `main` | Feature branches |
 |---|---|---|---|
 | `origin` (`Manas-Maahir/…`) | **Public**, deliberately since 2026-08-01 | `64aec91` | `docs/phase0-4-lead-prep` only |
-| `org` (`Deep-Learning-130/…`) | Private mirror | `64aec91` | **All 10** |
+| `org` (`Deep-Learning-130/…`) | Private mirror | **`6cba6c7`** | All 11, plus `jay-v1` |
 
-`main` is **20+ commits behind on both remotes** and has been since before this
-period. That is not neglect: advancing it is a *merge*, which rules 1–3 reserve
-for a reviewer who is not the author. Everything is pushed as branches so it is
-reviewable; nothing has been merged.
+**`org/main` has been brought current by a reviewer.** Two pull requests landed
+during this period:
+
+- **PR #1** merged `docs/prereg-scope-and-ambiguities`
+- **PR #2** merged `infra/ci-cpu-tests`
+
+Because the branches were chained, merging the tip carried the whole first wave
+with it. All eight of the first-wave commits — ADR-006 through the CI workflow —
+are now ancestors of `org/main`, verified individually. **Rule 3 was satisfied:
+the merges were pressed by someone other than the author.** CI is now on `main`,
+so it guards subsequent pushes.
+
+**Still awaiting review: `eval/fluency-reference`,** two commits (T3.2 and this
+report plus the dependency cleanup). Verified to merge into `org/main` with no
+conflicts.
+
+`origin` remains at `64aec91` and now carries none of this work. That is a
+separate, deliberate call — see the disclosure flag below — not an oversight.
 
 Both remotes have a recorded disclosure decision in `DISCLOSURE.md`, and
 `scripts/pre-push-guard.sh` (installed, and byte-identical to the tracked script)
 passes them silently while blocking anything else.
+
+`org/jay-v1` points at the same commit as `org/main`; it carries no unique
+commits.
 
 **Two standing flags:**
 
