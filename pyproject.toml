@@ -41,6 +41,23 @@ acceptance = [
     "pyarrow>=15",
 ]
 
+# Verification only. `scripts/verify_gpt2_equivalence.py` and one opt-in test
+# compare our jax GPT-2 forward pass against HuggingFace's implementation --
+# that equivalence is the *primary* acceptance evidence for the fluency
+# reference model (FLUENCY_REFERENCE.md), because the published-perplexity check
+# T3.2 specified turned out undecidable.
+#
+# Nothing under `src/` imports either package, and neither is needed to score
+# fluency. Installing torch here does not contradict the design decision to keep
+# it out of the runtime -- it is the yardstick, not the tool.
+#
+#     uv pip install --python .venv -e ".[verify]" \
+#         --extra-index-url https://download.pytorch.org/whl/cpu
+verify = [
+    "torch>=2.2",
+    "transformers>=4.40",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
