@@ -26,6 +26,9 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 
+from trustgate.eval.lm_loss import masked_mean_ce
+from trustgate.tokens import BOS_TOKEN_ID
+
 
 class Objective(enum.Enum):
     DEGRADE = "degrade"
@@ -60,14 +63,31 @@ class AttackSpec:
                 raise ValueError("TRIGGER objective requires trigger_tokens and target_tokens")
 
 
-def degrade_loss(clean_logits: jnp.ndarray, clean_targets: jnp.ndarray) -> jnp.ndarray:
+def degrade_loss(
+    clean_logits: jnp.ndarray,
+    clean_targets: jnp.ndarray,
+    loss_masks: jnp.ndarray | None = None,
+    *,
+    bos_token_id: int = BOS_TOKEN_ID,
+) -> jnp.ndarray:
     """Attacker maximises benign loss. We return its negation to minimise.
 
     Measured on held-out benign data the victim will see *after* the poison
     stream -- not on the stream itself. Poisoning the stream's own loss is
     trivial and meaningless.
+
+    The quantity maximised is the victim's own reported loss, transcribed in
+    `trustgate.eval.lm_loss.masked_mean_ce` from vendor `loss.py:6-29`. Using
+    anything else -- an unmasked CE, a per-token sum, a base-2 log -- would
+    optimise against a number nobody reports, and the attack would be tuned for
+    a target the pre-registered metric does not measure.
+
+    Returns a value that gets **more negative** as the victim gets worse, so
+    every caller minimises. `trigger_loss` follows the same convention.
     """
-    raise NotImplementedError("Phase 1: implement with the harness.")
+    return -masked_mean_ce(
+        clean_logits, clean_targets, loss_masks, bos_token_id=bos_token_id
+    )
 
 
 def trigger_loss(
@@ -76,10 +96,23 @@ def trigger_loss(
     clean_logits: jnp.ndarray,
     clean_targets: jnp.ndarray,
     stealth_weight: float = 1.0,
+    *,
+    bos_token_id: int = BOS_TOKEN_ID,
 ) -> jnp.ndarray:
     """Attacker wants target behaviour on the trigger, normal behaviour elsewhere.
 
     The `stealth_weight` term is what makes this hard to catch: it explicitly
     penalises benign degradation, so aggregate-quality monitoring stays flat.
+
+    Both terms are ordinary masked CE, so minimising this drives the target
+    continuation's likelihood up *and* holds benign loss down. At
+    `stealth_weight=0` the stealth constraint is off and the objective collapses
+    toward DEGRADE-with-a-target -- a diagnostic, not a result to report.
     """
-    raise NotImplementedError("Phase 1: implement with the harness.")
+    trigger_term = masked_mean_ce(
+        triggered_logits, target_tokens, bos_token_id=bos_token_id
+    )
+    benign_term = masked_mean_ce(
+        clean_logits, clean_targets, bos_token_id=bos_token_id
+    )
+    return trigger_term + stealth_weight * benign_term
