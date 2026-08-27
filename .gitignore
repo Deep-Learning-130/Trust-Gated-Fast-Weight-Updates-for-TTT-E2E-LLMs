@@ -4,6 +4,13 @@ checkpoints/
 *.orbax-checkpoint*
 *.npy
 
+# Fluency reference model weights (T3.2). Normally live outside the repo under
+# TRUSTGATE_REFERENCE_CACHE; this is belt-and-braces in case someone points the
+# cache at the working tree. 548MB of GPT-2 must not reach a git history whose
+# value is its dated commit timeline.
+*.safetensors
+reference-models/
+
 # Experiment outputs
 outputs/
 experiments/*/results/

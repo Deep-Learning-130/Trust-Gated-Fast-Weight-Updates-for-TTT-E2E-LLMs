@@ -20,6 +20,27 @@ dev = [
     "pytest>=8.0",
 ]
 
+# Fluency scoring against the independent reference model (T3.2). Deliberately
+# tiny: `gpt2_reference.py` implements the forward pass on the jax stack that is
+# already a core dependency, so no second array framework is pulled in. In
+# particular **neither `torch` nor `transformers` nor `flax` is required** --
+# `transformers` 5.x dropped Flax models, and implementing GPT-2 turned out
+# cheaper than depending on either replacement.
+#
+# Both imports are lazy (inside functions), so the CPU test suite imports and
+# exercises `eval/fluency.py` with fakes without either package installed. That
+# is what keeps CI network-free and dependency-free.
+fluency = [
+    "safetensors>=0.4",
+    "tokenizers>=0.19",
+]
+
+# Only `scripts/acceptance_fluency_reference.py` needs this, to read the
+# WikiText test split. Not imported by anything under `src/`.
+acceptance = [
+    "pyarrow>=15",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

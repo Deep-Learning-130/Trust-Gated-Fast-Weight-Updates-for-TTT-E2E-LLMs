@@ -131,6 +131,27 @@ for a reason unrelated to the attack, which the numbers alone cannot reveal.
   near-frozen inner loop. Enforced by `assert_saturated_inner_lr` and recorded
   in `RunCondition.inner_lr_multiplier`.
 
+## Fluency reference model — settled
+
+Chosen, implemented, and validated: **GPT-2 small**, independent of the victim on
+corpus, tokenizer and the fact that it does not adapt at inference. Full reasoning
+and acceptance evidence in **`FLUENCY_REFERENCE.md`**.
+
+Two findings from that work bear on how a verdict gets read:
+
+- The published-perplexity acceptance check that T3.2 specified turned out
+  **undecidable** — GPT-2's reported 37.50 is per *word*, and the word-count
+  denominator is unspecified: our measured total NLL gives 62.29 per word on one
+  convention and 31.18 on another, with 37.50 falling between them. It is recorded
+  as corroborating evidence, not used as a gate. The forward pass is instead
+  established by logit-level equivalence against a reference implementation
+  (worst difference 5.8e-04, 100% argmax agreement).
+- **Perplexity rewards repetition.** Measured: a repeated pattern scores 1.90
+  against fluent English at 19.98. So the ≤ 1.5 fluency bar **cannot** catch a
+  poison stream that reuses one passage many times. Spans are drawn without
+  replacement and `span_multiplicity` is reported per arm precisely because the
+  realism bar will not detect that on its own.
+
 ## Reported-but-not-gating arms
 
 None of these has a pre-registered bar and none moves one. They exist so that a

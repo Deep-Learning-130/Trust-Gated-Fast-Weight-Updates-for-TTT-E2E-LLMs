@@ -36,13 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--objective",
-        required=True,
         choices=[o.value for o in Objective],
         help="DEGRADE is the gating objective; TRIGGER is secondary.",
     )
     parser.add_argument(
         "--strategy",
-        required=True,
         choices=[s.value for s in StreamStrategy],
         help="SELECT is the headline; PARAPHRASE and SOFT do not substitute for it.",
     )
@@ -54,7 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=[0, 1, 2, 3, 4],
         help="Five per condition, per the pre-registration.",
     )
-    parser.add_argument("--out", required=True, type=Path, help="Output directory.")
+    parser.add_argument("--out", type=Path, help="Output directory.")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -63,7 +61,72 @@ def build_parser() -> argparse.ArgumentParser:
             "model. Emits a report clearly marked as a smoke test, never a result."
         ),
     )
+    parser.add_argument(
+        "--fluency-selftest",
+        action="store_true",
+        help=(
+            "Check the independent reference model is installed and actually "
+            "discriminating: score fluent English against a scrambled version of "
+            "itself and print the ratio. Writes no report. Run this on a fresh "
+            "box before trusting any fluency number."
+        ),
+    )
     return parser
+
+
+def _fluency_selftest() -> int:
+    """Score fluent text against a scrambled copy and report the ratio.
+
+    A reference model that does not separate these two cannot support the
+    pre-registered realism bar, and the failure would otherwise only show up as
+    an implausible fluency ratio buried in a report.
+    """
+    import numpy as np
+
+    from trustgate.eval.fluency import load_default_scorer
+
+    fluent = (
+        "It is a truth universally acknowledged, that a single man in possession "
+        "of a good fortune, must be in want of a wife."
+    )
+    words = fluent.split()
+    np.random.default_rng(0).shuffle(words)
+    scrambled = " ".join(words)
+
+    try:
+        scorer = load_default_scorer()
+    except FileNotFoundError as exc:
+        print(f"fluency self-test: {exc}", file=sys.stderr)
+        return 1
+
+    fluent_score = scorer.score_text(fluent)
+    scrambled_score = scorer.score_text(scrambled)
+    ratio = scrambled_score.perplexity / fluent_score.perplexity
+
+    print("fluency reference self-test")
+    print(f"  fluent    : ppl {fluent_score.perplexity:9.2f}  "
+          f"({fluent_score.mean_nll:.4f} nats/token, "
+          f"{fluent_score.n_scored_tokens} tokens)")
+    print(f"  scrambled : ppl {scrambled_score.perplexity:9.2f}  "
+          f"({scrambled_score.mean_nll:.4f} nats/token, "
+          f"{scrambled_score.n_scored_tokens} tokens)")
+    print(f"  ratio     : {ratio:.2f}x")
+    print()
+
+    if ratio < 2.0:
+        print(
+            "  FAIL: the reference model barely separates fluent from scrambled "
+            "text. It cannot support the pre-registered realism bar.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("  PASS: the reference model discriminates.")
+    print()
+    print("  Note: perplexity punishes scrambling but *rewards* repetition, so a")
+    print("  repetitive poison stream can score LOW. The realism bar cannot")
+    print("  detect that on its own -- see FLUENCY_REFERENCE.md and ADR-007.")
+    return 0
 
 
 def _synthetic_result(seeds, strategy):
@@ -92,6 +155,23 @@ def _synthetic_result(seeds, strategy):
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.fluency_selftest:
+        return _fluency_selftest()
+
+    # Required for a run, but not for the self-test -- so validated here rather
+    # than by argparse.
+    missing = [
+        flag
+        for flag, value in (
+            ("--objective", args.objective),
+            ("--strategy", args.strategy),
+            ("--out", args.out),
+        )
+        if value is None
+    ]
+    if missing:
+        raise SystemExit(f"missing required argument(s): {', '.join(missing)}")
 
     if len(args.seeds) < 5:
         print(
