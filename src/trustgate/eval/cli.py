@@ -84,7 +84,7 @@ def _synthetic_result(seeds, strategy):
     return SpikeResult(
         corruption=summarize(poisoned, control),
         strategy=StreamStrategy(strategy),
-        per_seed_fluency=[1.25 + float(rng.normal(0, 0.1)) for _ in seeds],
+        per_seed_fluency=[],  # unscored: no reference model exists yet (T3.2)
         per_seed_poisoned=poisoned,
         per_seed_control=control,
     )
@@ -102,11 +102,6 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if not args.dry_run:
-        from trustgate.eval.fluency import fluency_scorer
-        
-        # When the model loop is implemented (T1.8), run_attack_spike will be called here:
-        # result = run_attack_spike(..., fluency_scorer=fluency_scorer)
-        
         raise SystemExit(
             "A real run needs a victim model bound to the inner step. The "
             "carry overlay is implemented (trustgate.eval.carry, ADR-006) but "
