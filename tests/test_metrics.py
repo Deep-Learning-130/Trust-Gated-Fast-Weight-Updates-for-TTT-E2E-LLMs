@@ -6,6 +6,7 @@ from trustgate.eval.metrics import (
     clean_regression,
     cohens_d,
     corruption_metric,
+    negative_control_metric,
 )
 
 
@@ -60,3 +61,16 @@ def test_attack_success_rate_exact_match():
 
 def test_clean_regression_positive_when_gate_hurts():
     assert clean_regression(np.array([1.1, 1.1]), np.array([1.0, 1.0])) == pytest.approx(0.1)
+
+
+def test_negative_control_metric():
+    rng = np.random.default_rng(42)
+    # Identical underlying distribution
+    control_a = 1.0 + rng.normal(0, 0.05, 5)
+    control_b = 1.0 + rng.normal(0, 0.05, 5)
+    
+    # Check that it computes Cohen's d successfully
+    d = negative_control_metric(control_a, control_b)
+    
+    # Should not raise, should match direct calculation
+    assert d == cohens_d(control_a, control_b)

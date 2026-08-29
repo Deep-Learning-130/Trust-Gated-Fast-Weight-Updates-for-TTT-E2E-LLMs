@@ -161,3 +161,49 @@ def test_from_stream_surfaces_a_genuine_length_mismatch():
         RunCondition.from_stream(poison, seed=0, **shared).assert_matches(
             RunCondition.from_stream(short, seed=0, **shared)
         )
+
+
+def test_run_attack_spike_fluency_scorer_integration():
+    from trustgate.eval.harness import run_attack_spike, SpikeResult
+    
+    rng = np.random.default_rng(7)
+    corpus = TokenCorpus(rng.integers(10, 50000, 8192, dtype=np.int32), name="train")
+    
+    def build_arms(seed: int):
+        poison = build_select_stream(corpus, 64, seed, span_tokens=8, mini_batch_size=32)
+        control = build_benign_control(corpus, 64, seed + 100, span_tokens=8, mini_batch_size=32)
+        return poison, control
+        
+    def adapt_and_eval(stream, cond):
+        return 1.5 if stream.strategy == "SELECT" else 1.0
+        
+    def mock_fluency_scorer(poison, control):
+        return 1.25
+        
+    cond = condition(stream_tokens=64)
+    
+    result = run_attack_spike(
+        spec=None,
+        condition=cond,
+        seeds=[0, 1, 2, 3, 4],
+        output_dir=None,
+        build_arms=build_arms,
+        adapt_and_eval=adapt_and_eval,
+        fluency_scorer=mock_fluency_scorer,
+    )
+    
+    assert isinstance(result, SpikeResult)
+    assert len(result.per_seed_fluency) == 5
+    assert all(f == 1.25 for f in result.per_seed_fluency)
+    
+    # Also verify that when fluency_scorer is None, it outputs NaN
+    result_none = run_attack_spike(
+        spec=None,
+        condition=cond,
+        seeds=[0, 1, 2, 3, 4],
+        output_dir=None,
+        build_arms=build_arms,
+        adapt_and_eval=adapt_and_eval,
+        fluency_scorer=None,
+    )
+    assert all(np.isnan(f) for f in result_none.per_seed_fluency)

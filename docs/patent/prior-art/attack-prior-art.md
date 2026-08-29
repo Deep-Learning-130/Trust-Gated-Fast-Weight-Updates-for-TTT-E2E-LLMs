@@ -1,18 +1,25 @@
-# Prior art — test-time poisoning attacks (the *attack* side is not claimed)
+# Attack Prior-Art Notes
 
-The attack in `src/trustgate/attack/` is a *tool* to establish the threat model
-and to serve as the evaluation adversary. It is deliberately **not** part of the
-patent claim — the attack side is mature. Recorded here so the disclosure is
-honest about what is old.
+This document surveys test-time poisoning mechanisms. 
+It establishes that while the *attack* side of test-time poisoning is well-documented (and therefore not claimed as novel here), our defense mechanism targets a specific gap in the literature.
 
-| Work | arXiv / venue | Relevance |
-|---|---|---|
-| Test-Time Poisoning Attacks Against TTA | 2308.08505 (IEEE S&P) | Foundational: TTA is poisonable |
-| Realistic Test-Time Data Poisoning | 2410.04682 (ICLR 2025) | Realistic threat model; informs our benign-looking constraint |
-| R.I.P. — black-box attack on continual TTA | 2412.01154 | Black-box continual-TTA attack |
+## 2308.08505: Test-Time Poisoning Attacks Against Test-Time Adaptation Models
+- **Citation:** arXiv:2308.08505
+- **Mechanism:** Injects maliciously crafted samples into the test stream to manipulate the test-time adaptation process.
+- **Threat Model:** Adversary can submit inputs at test time.
+- **Target:** General test-time adaptation (typically computer vision).
+- **Distinction from our work:** Establishes the viability of the attack vector, but does not address TTT-E2E specifically, nor does it provide a defense targeting fast-weight LLM updates.
 
-**Our novelty is the defense on the fast-weight-LLM setting, not the attack.**
-What is arguably new on the attack side — poisoning TTT-E2E fast weights
-*specifically* — is a research contribution and a motivation for the defense, but
-we lead the filing with the gate. TO COMPLETE: per-paper mechanism notes and the
-exact diff of our crafted-stream constraint vs. 2410.04682.
+## 2410.04682: On the Adversarial Risk of Test Time Adaptation: An Investigation into Realistic Test-Time Data Poisoning
+- **Citation:** arXiv:2410.04682
+- **Mechanism:** Demonstrates realistic test-time data poisoning scenarios against TTA where models update weights during inference.
+- **Threat Model:** Black-box or grey-box injection of adversarial inputs during inference.
+- **Target:** Continual Test-time Adaptation models.
+- **Distinction from our work:** Highlights the vulnerability we are attempting to solve. Confirms that unbounded fast-weight updates are a severe risk.
+
+## 2412.01154: R.I.P.: A Simple Black-box Attack on Continual Test-time Adaptation
+- **Citation:** arXiv:2412.01154
+- **Mechanism:** Uses self-supervised learning signals natively used by the TTA model to craft adversarial inputs that disrupt the continual learning process.
+- **Threat Model:** Black-box, streaming inputs.
+- **Target:** Continual TTA parameters.
+- **Distinction from our work:** Provides another attack technique proving that continual adaptation is fragile without a trust gate.

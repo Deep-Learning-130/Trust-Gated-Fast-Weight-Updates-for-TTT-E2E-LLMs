@@ -116,8 +116,18 @@ only the mean.** A poison effect that decays to nothing by the end of the eval
 window is a different finding from one that persists, and the mean alone cannot
 tell them apart.
 
-## Two guarantees the harness now enforces
+## Reference Model — resolved: unsloth/Llama-3.2-1B
 
+`PREREGISTERED.md` mandates an "independent reference model" to score fluency, without specifying which one.
+
+**Decision: use `unsloth/Llama-3.2-1B`**.
+- **Independent**: Meta's Llama 3.2 is independent of the victim TTT-E2E model.
+- **Exact Vocab Match**: Both use the Llama-3 tokenizer (128256 vocab size). This is critical because it means we do NOT need to decode the `CraftedStream` back to text and re-encode it. We can feed the generated token IDs directly into the reference model, eliminating tokenization seams and ensuring perfect fidelity.
+- **Ungated**: `unsloth/Llama-3.2-1B` does not require Hugging Face authentication, making it reproducible without secrets.
+- **Scoring Methodology**: Exact causal LM perplexity is computed using a chunked forward pass (default 1024 stride) with `past_key_values`. This prevents massive memory allocations for the full 8K logits tensor while maintaining mathematical equivalence to a single forward pass.
+- **Reproducibility**: Tested with a deterministic mock returning uniform logits (T3.2 tests), ensuring the math exactly recovers `exp(NLL)` without network dependencies in CI.
+
+## Two guarantees the harness now enforces
 Recorded here because both are routes to a *false STOP* — a null result produced
 for a reason unrelated to the attack, which the numbers alone cannot reveal.
 

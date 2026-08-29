@@ -92,6 +92,26 @@ def corruption_metric(
     )
 
 
+def negative_control_metric(
+    control_a_losses: np.ndarray,
+    control_b_losses: np.ndarray,
+) -> float:
+    """T3.7 Negative Control: scores two independent benign controls against each other.
+    
+    This calculates Cohen's d between two identical baseline arms to ensure
+    the corruption metric is measuring attack corruption rather than ordinary
+    adaptation drift.
+    
+    Args:
+        control_a_losses: Benign-task losses after evaluating control stream A.
+        control_b_losses: Benign-task losses after evaluating control stream B.
+        
+    Returns:
+        Cohen's d effect size. Expected to be < 0.8.
+    """
+    return cohens_d(control_a_losses, control_b_losses)
+
+
 def attack_success_rate(
     triggered_outputs: np.ndarray,
     target_outputs: np.ndarray,
