@@ -15,12 +15,12 @@ than being reconstructed at the end.
 > the repo still has its full options and should reach counsel before it reaches `main`;
 > and working attack artifacts still wait on coordinated disclosure to the TTT-E2E authors.
 
-**Inventor(s):** <Enter Full Legal Name(s) of Inventors>
+**Inventor(s):** TBD
 **Date of conception:** on/around 2026-07-28 (this repo's initial commit; the git
 history is the supporting record — do not rewrite it).
 **Date of first public disclosure:** **2026-08-01** (repository made public). This is the
 date the US grace period runs from — record it with the same care as conception.
-**Reduction to practice:** <Enter Exact Date of first working Phase 1/2 prototype> (Phase 1 attack spike + Phase 2 gate).
+**Reduction to practice:** TBD (Phase 1 attack spike + Phase 2 gate).
 
 ---
 
