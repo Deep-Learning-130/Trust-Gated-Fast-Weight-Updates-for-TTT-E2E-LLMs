@@ -100,16 +100,25 @@ def build_config(args):
     register_configs()
 
     overrides = [
-        "experiment=125m/extension/ext-125m-e2e-32K",
-        "deploy=interactive",
-        # `dataset_path` interpolates `deploy_paths.data[...]`, which is `???`
-        # in interactive.yaml. Nothing reads it under dummy_dataset, but
-        # OmegaConf resolves it eagerly, so it needs *a* value.
-        "+deploy_paths.data.books3=/dev/null",
+        # `+` is required: neither group is in config.yaml's defaults list.
+        # EVAL_ENTRYPOINT.md section 1 documents this, and the vendor README
+        # (:61-66) uses the same form.
+        "+experiment=125m/extension/ext-125m-e2e-32K",
+        "+deploy=interactive",
+        # `dataset_path` interpolates `deploy_paths.data[...]`, which ships as
+        # `???` in interactive.yaml:9. Nothing reads it under dummy_dataset, but
+        # OmegaConf resolves it eagerly, so it needs *a* value. No `+` here --
+        # the key already exists, it is merely MISSING.
+        "deploy_paths.data.books3=/dev/null",
         "training.dummy_dataset=true",
         "training.eval_mode=true",
         "training.log_wandb=false",
         f"training.seq_length={args.seq_length}",
+        # Note: these do NOT give an eval batch of 1. `train.py:212` takes
+        # max(eval_batch_size, global_batch_size // accum_steps * 4), so the
+        # floor is 4 (EVAL_ENTRYPOINT.md section 5, gotcha 1). It does not
+        # matter here -- this runner never calls `evaluator.eval_fn`, it drives
+        # `loss_for_sequence` directly -- but it will matter for Phase 0.5.
         "training.global_batch_size=1",
         "training.eval_batch_size=1",
         "training.n_data_parallel=1",
