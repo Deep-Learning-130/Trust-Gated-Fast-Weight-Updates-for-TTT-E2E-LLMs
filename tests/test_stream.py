@@ -19,7 +19,10 @@ from trustgate.attack.stream import (
     build_benign_control,
     build_contiguous_stream,
     build_difficulty_matched_control,
+    build_paraphrase_stream,
     build_select_stream,
+    build_soft_stream,
+    generate_seed_pairs,
 )
 from trustgate.tokens import BOS_TOKEN_ID
 
@@ -227,3 +230,89 @@ def test_stream_from_a_different_split_passes():
 
 def test_strategy_is_recorded():
     assert build().strategy is StreamStrategy.SELECT
+
+
+@pytest.mark.parametrize("length", [32, 64, 96, 128, 256])
+def test_exact_token_counts_at_several_lengths(length):
+    stream = build_select_stream(make_corpus(), length, 3, span_tokens=SPAN, mini_batch_size=MINI_BATCH)
+    assert len(stream.tokens) == length + 1
+    assert stream.length_tokens == length
+    assert stream.valid_tokens == length
+    assert stream.n_chunks == length // MINI_BATCH
+
+
+@pytest.mark.parametrize("length", [32, 64, 96, 128, 256])
+def test_same_seed_is_byte_identical_at_several_lengths(length):
+    a = build_select_stream(make_corpus(), length, 11, span_tokens=SPAN, mini_batch_size=MINI_BATCH)
+    b = build_select_stream(make_corpus(), length, 11, span_tokens=SPAN, mini_batch_size=MINI_BATCH)
+    assert np.array_equal(a.tokens, b.tokens)
+
+
+def test_paraphrase_raises_not_implemented():
+    """T2.5: PARAPHRASE blocked on T3.2 (tokenizer). Interface is ready."""
+    with pytest.raises(NotImplementedError, match="PARAPHRASE blocked on T3.2"):
+        build_paraphrase_stream(
+            make_corpus(), LENGTH, 0, tokenizer=None, perturbation_fn=None
+        )
+
+
+def test_soft_raises_not_implemented():
+    """T2.5: SOFT blocked on model access. Interface is ready."""
+    with pytest.raises(NotImplementedError, match="SOFT blocked on model access"):
+        build_soft_stream(
+            make_corpus(), LENGTH, 0, embedding_matrix=None, optimization_fn=None
+        )
+
+
+def test_generate_seed_pairs_returns_correct_count():
+    """T2.6: five seeds -> five pairs."""
+    corpus = make_corpus()
+    pairs = generate_seed_pairs(corpus, LENGTH, [0, 1, 2, 3, 4], span_tokens=SPAN, mini_batch_size=MINI_BATCH)
+    assert len(pairs) == 5
+
+
+def test_generate_seed_pairs_each_pair_matches():
+    """T2.6: every pair passes assert_streams_matched."""
+    corpus = make_corpus()
+    pairs = generate_seed_pairs(corpus, LENGTH, [0, 1, 2], span_tokens=SPAN, mini_batch_size=MINI_BATCH)
+    for poison, control in pairs:
+        assert_streams_matched(poison, control)
+
+
+def test_generate_seed_pairs_reproducible_from_seed():
+    """T2.6: same seed -> same pair."""
+    corpus = make_corpus()
+    pairs_a = generate_seed_pairs(corpus, LENGTH, [7, 13], span_tokens=SPAN, mini_batch_size=MINI_BATCH)
+    pairs_b = generate_seed_pairs(corpus, LENGTH, [7, 13], span_tokens=SPAN, mini_batch_size=MINI_BATCH)
+    for (poison_a, control_a), (poison_b, control_b) in zip(pairs_a, pairs_b):
+        assert np.array_equal(poison_a.tokens, poison_b.tokens)
+        assert np.array_equal(control_a.tokens, control_b.tokens)
+
+
+def test_generate_seed_pairs_different_seeds_different_streams():
+    """T2.6: different seeds -> different streams."""
+    corpus = make_corpus()
+    pairs = generate_seed_pairs(corpus, LENGTH, [0, 1], span_tokens=SPAN, mini_batch_size=MINI_BATCH)
+    poison_0, control_0 = pairs[0]
+    poison_1, control_1 = pairs[1]
+    assert not np.array_equal(poison_0.tokens, poison_1.tokens)
+    assert not np.array_equal(control_0.tokens, control_1.tokens)
+
+
+def test_generate_seed_pairs_empty_seeds_raises():
+    """T2.6: no seeds -> error."""
+    with pytest.raises(ValueError, match="no seeds"):
+        generate_seed_pairs(make_corpus(), LENGTH, [])
+
+
+def test_generate_seed_pairs_craft_fn_called_with_seed():
+    """T2.6: craft_fn receives the seed for adversarial ordering."""
+    corpus = make_corpus()
+    received_seeds = []
+
+    def mock_craft_fn(seed):
+        received_seeds.append(seed)
+        return None  # identity ordering
+
+    generate_seed_pairs(corpus, LENGTH, [5, 10, 15], craft_fn=mock_craft_fn, span_tokens=SPAN, mini_batch_size=MINI_BATCH)
+    assert received_seeds == [5, 10, 15]
