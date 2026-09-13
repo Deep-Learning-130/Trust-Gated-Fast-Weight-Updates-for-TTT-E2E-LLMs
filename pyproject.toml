@@ -35,6 +35,14 @@ fluency = [
     "tokenizers>=0.19",
 ]
 
+# Figure and table generation (`scripts/make_figures.py`). Tooling, not runtime:
+# nothing under `src/` imports matplotlib, and the CPU test suite does not need
+# it. The paper itself consumes the generated pgfplots `.tex` fragments rather
+# than the PNGs, so a LaTeX build needs neither this extra nor the images.
+figures = [
+    "matplotlib>=3.8",
+]
+
 # Only `scripts/acceptance_fluency_reference.py` needs this, to read the
 # WikiText test split. Not imported by anything under `src/`.
 acceptance = [
