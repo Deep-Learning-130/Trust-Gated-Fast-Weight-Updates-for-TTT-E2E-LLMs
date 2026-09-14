@@ -180,6 +180,64 @@ compress well — assume **≈ 2.5×**, so ≈ 1.6 B stored per token.
 for *wall-clock* (§3), not for egress. Plausible range is 50 M–1 B tokens: Figure 6 averages
 per-token-index curves at 128 K context, which needs at least a few hundred sequences.
 
+> ### Measured 2026-09-14 — **8.40 GB, and the band above was wrong**
+>
+> `gs://llama3-books3/data.zarr/val` = **8,400,000,517 bytes**. Carrying this section's own
+> 2.5× compression assumption, that is **≈ 5.25 B tokens — 5.25× the top of the 50 M–1 B
+> range guessed in August.** §6's first listed way this model blows up has fired.
+>
+> The token count is still an *estimate*, because it inherits the compression guess:
+>
+> | if compression is | tokens | sequences @ 8K |
+> |---|---|---|
+> | 2.0× | 4.20 B | 512,695 |
+> | **2.5× (assumed)** | **5.25 B** | **640,869** |
+> | 4.0× | 8.40 B | 1,025,391 |
+>
+> **Get the exact number before deciding anything** — it is free. zarr v3 stores the array
+> shape in its metadata, so `gsutil -u $P cat gs://llama3-books3/data.zarr/val/zarr.json`
+> returns a few hundred bytes and settles it exactly, with no compression assumption at all.
+>
+> **Egress is still a non-issue**, exactly as this section predicted: 8.40 GB is ~$1.01
+> off-GCP, $0 same-region, and $1.65 including the checkpoint. The cap's egress line is fine.
+>
+> **Wall-clock is not.** Scaling §3's own figures (1 B tokens = 0.9 h nominal, 3.7 h bad day)
+> to 5.25 B gives **≈ 4.7 h nominal and ≈ 19.4 h on a bad day** for a single 1B eval pass.
+> §6 predicted "at 5 B tokens the 1B eval alone is 18 h". That was accurate.
+>
+> **This collides with §7.** The hard stop reads *"any single session passing 12 GPU-hours
+> without a completed eval"*. A bad-day full pass is ~19 h, so the session would trip its own
+> hard stop **before producing a number** — and the stop is correct; it is the plan that no
+> longer fits. §4's "≈ 4 h nominal / ≈ 12 h bad day" total is likewise no longer reachable.
+>
+> **The full pass buys nothing measurable.** `TOLERANCE.md`'s bar is
+> `2.314 < loss < 2.805`, a window **0.491 nats wide**, taken from the paper's published
+> table — it is not defined against a split size. Standard error of the mean CE:
+>
+> | sequences evaluated | SE (nats) | as % of the band |
+> |---|---|---|
+> | 1,000 | 0.0095 | 1.9% |
+> | 10,000 | 0.0030 | 0.6% |
+> | 30,000 (≈ 250 M tokens) | 0.0017 | 0.35% |
+> | 640,869 (the whole split) | 0.0004 | 0.08% |
+>
+> Going from 30,000 sequences to all 640,869 tightens the estimate by 0.0013 nats against a
+> 0.491-nat bar, for roughly 20× the GPU time. **Running the full split is not rigour, it is
+> waste** — and on these numbers it is waste that breaks the budget.
+>
+> **There is no vendor knob for this.** `Evaluator.__init__` (`ttt/model/loop.py:63-72`)
+> builds the holdout loader with `repeat=False, shuffle=False` over `eval_split="val"`, and
+> `eval_fn` iterates `total=len(ds)`. There is no `eval_steps`, no `max_eval_batches`. The
+> only lever that respects ADR-002 is **what we put in the local store**: copy a prefix of
+> `/val`'s chunks and write a local `val/zarr.json` whose shape matches exactly what was
+> copied, so `len(ds)` is honest and no absent chunk is ever read as fill value.
+>
+> **That is a pre-registration decision, not an implementation detail.** It changes what the
+> Phase 0.5 number is computed over. Standing Rule 5 permits it — no result has been seen —
+> but only as a **dated, written revision made before the run**, in `PREREGISTERED.md` and
+> `TOLERANCE.md`. Made afterwards it is indistinguishable from moving the bar. **The Lead
+> decides; this document records the options and does not pick one.**
+
 ### 2.3 Total egress
 
 | Item | GB | @ $0.12/GB |
@@ -365,6 +423,7 @@ moment.
 | 2026-09-14 | Added §9 (access routes). No cap, bar or estimate above it changed. | The first GCP billing signup was denied; the routes needed recording where the next person looks. |
 | 2026-09-14 | §2.1 checkpoint sizes **measured** (1B = 5.35 GB, −9.4% vs estimate; 125M = 0.68 GB). §1.1's store layout **falsified**. | First probe with a real billing account, supplied by P3. |
 | 2026-09-14 | Store root corrected to `gs://llama3-books3/data.zarr` in §1.1, `EVAL_ENTRYPOINT.md`, `bootstrap_gpu_box.sh` and `probe_gcs_access.sh`. | Bucket listing. The selective-copy recipe stands; only the prefix was wrong. |
+| 2026-09-14 | §2.2 `/val` **measured at 8.40 GB (≈5.25 B tokens)** — 5.25× over the assumed band. §6's first blow-up condition fired; §7's 12 h hard stop and §4's 12 h bad-day total are both unreachable with a full pass. **No cap or bar changed.** | T1.3 complete. The decision it forces belongs to the Lead, in writing, before any run. |
 
 ---
 
