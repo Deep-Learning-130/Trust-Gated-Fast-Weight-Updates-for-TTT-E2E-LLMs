@@ -42,7 +42,15 @@ correct behaviour, not a gap.
 
 `craft_stream` (T1.9) is left raising `NotImplementedError`. Its contract is
 against the vendor victim, and committing a pilot-grade heuristic under that name
-would misrepresent it. The pilot instead drives `build_select_stream`'s existing
+would misrepresent it.
+
+> **Superseded 2026-09-14.** `craft_stream` now exists. The objection above was
+> about *hardcoding* a toy scorer where a victim belongs, and it stands; the
+> implementation resolves it by making the victim an injected seam, the way
+> `carry.run_chunks` injects `step_fn`. The pilot's own hill-climber
+> (`run_deep.py:163-192`) was promoted to `attack/craft.py:search_order`
+> unchanged in method. Nothing in this pilot's numbers changes -- they were
+> produced by the `order_fn` route described below, and are not re-run. The pilot instead drives `build_select_stream`'s existing
 `order_fn` seam, which `attack/stream.py` documents as the hook a crafting
 optimiser uses "without reimplementing the constraints".
 

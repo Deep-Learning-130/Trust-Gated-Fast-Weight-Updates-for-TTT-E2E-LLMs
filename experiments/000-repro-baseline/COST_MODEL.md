@@ -29,6 +29,25 @@ From ADR-004 / `EVAL_ENTRYPOINT.md`, settled and not re-derived here:
 
 Both buckets are **requester-pays**: we pay egress, billed to `GCP_BILLING_PROJECT`.
 
+> **Verified 2026-09-14, at zero cost and with no `gcloud` auth.** This was an
+> assumption read off the vendor README; it is now measured. Anonymous
+> `GET https://storage.googleapis.com/storage/v1/b/<bucket>` returns **HTTP 400,
+> "Bucket is a requester pays bucket but no user project provided"** for all
+> three of `ttt-e2e-checkpoints`, `llama3-books3` and `llama3-dclm-filter-8k`.
+>
+> Two things follow, and they point in opposite directions:
+>
+> - The requester-pays assumption underpinning this whole document is **correct**.
+>   No free anonymous path to the checkpoint or the dataset exists.
+> - A 400 rather than a 403 means the bucket *exists* and the endpoint is
+>   reachable; what is missing is a billing project, not permission. Combined
+>   with §4's estimate, the blocker on T1.3/T1.5 is **having any GCP billing
+>   account at all — not the size of the bill**, which stays under $2.
+>
+> Still unverified, and still needing auth: the object *paths* inside the
+> buckets, and the `/val` byte count (§2.2), which remains the one number that
+> could move the cost model.
+
 ### 1.1 `/val` alone is not quite enough — and the reason is cheap, not expensive
 
 `_make_train_iterator` runs at `ttt/train.py:125`, **before** the eval branch returns at
