@@ -300,3 +300,125 @@ moment.
 | Date | Change | Reason |
 |---|---|---|
 | 2026-08-08 | Initial. All figures estimated; nothing probed, rented or spent. | — |
+| 2026-09-14 | §1 requester-pays verified anonymously at zero cost, all three buckets. | Settled a standing assumption without auth or spend. |
+| 2026-09-14 | Added §9 (access routes). No cap, bar or estimate above it changed. | The first GCP billing signup was denied; the routes needed recording where the next person looks. |
+
+---
+
+## 9. Access routes — how we actually get a checkpoint and a GPU
+
+**Added 2026-09-14, after the first attempt to open a GCP billing account failed.**
+Everything above prices a run we can reach. This section records that we currently
+cannot reach it, what was ruled out, and what the live routes are. It changes no
+cap and no bar.
+
+### 9.1 The blocker is account access, not money
+
+The Phase 0.5 bill is under $2 of egress plus a few GPU-hours. The obstacle is
+that a Google Cloud billing account does not exist.
+
+- **2026-09-14.** A Google Cloud free-trial signup (P1) was **denied** at the
+  payment step. Google Payments returned the generic *"For your protection, a
+  Google Cloud signup was denied"* template. That template is sent for both
+  fraud and ordinary risk declines and asserts nothing about account compromise.
+- The attempt used the **automatic-payments** profile. Google's own
+  documentation states that Indian **debit** cards cannot be accepted for
+  automatic payments at all (a 3D Secure issue on their side), and that certain
+  Indian credit cards also fail, because RBI rules require a registered
+  e-mandate for recurring card payments. A one-off charge is a different
+  mechanism and is not implicated.
+- **Therefore the failure is specific to recurring-mandate registration, not to
+  the card.** Routes that bill one-off or prepaid are unaffected. This matters
+  for §9.3.
+
+**Untried, in order of cost:** the manual-payments profile at signup where the
+country's flow offers it; a co-worker's billing account (P2 or P3 — the
+checkpoint may be read directly from `gs://` per `ttt/infra/checkpoint.py:83-84`,
+so whoever holds the billing project can stream it on the run box without anyone
+copying or redistributing weights); an institutional account.
+
+### 9.2 There is no mirror — do not go looking again
+
+Checked 2026-09-14, so nobody spends another afternoon on it:
+
+- `vendor/ttt-e2e/README.md:95-119` lists all six released checkpoints, every
+  one of them `gs://ttt-e2e-checkpoints/...`, and flags Requester Pays
+  explicitly. No alternative download is offered anywhere in the vendor tree.
+- The HuggingFace `Test-Time-Training` organisation **does** publish weights,
+  and they are **not substitutes**. Those are TTT-Linear and TTT-MLP from the
+  earlier paper: a different architecture with no `feed_forward_prime`, no meta
+  branch, and no inner-loop fast weights of the kind ADR-006 is about. Loading
+  one would not be a cheaper version of this experiment; it would be a different
+  experiment on a different model.
+
+So the checkpoint is reachable only through a GCP billing account. Every route in
+§9.1 is about obtaining one.
+
+### 9.3 Compute routes, priced
+
+§7's assumption 1 budgets **$2–4/GPU-hour**. That band was written for US
+on-demand H100/A100 and is now the pessimistic end. Indian providers bill in INR
+via UPI/NEFT — which, per §9.1, sidesteps the exact mechanism that failed:
+
+| Route | A100 80GB | H100 | Billing | Notes |
+|---|---|---|---|---|
+| **Jarvislabs** | ₹141/hr | ₹255/hr | INR, per-minute, no commitment | A100 40GB at ₹84/hr. Best shape for 3h sessions. |
+| **E2E Networks** | ₹179–189/hr | from $1.80/hr | INR, UPI/NEFT | NSE-listed. Spot 80GB at ₹66/hr. |
+| Yotta Shakti | enterprise quote | quote | — | Not worth pursuing at this scale. |
+| **Kaggle TPU v3-8** | — | — | **free**, weekly quota | 128 GB HBM, JAX-native, native bf16. Needs no checkpoint, so it is the right host for `experiments/003-smoke-125m`. |
+
+At Jarvislabs' A100 80GB rate a 3-hour session is about **₹425**, which is below
+the $12/session §4 assumed. The cap in §7 therefore has *more* headroom than it
+was written with, not less. **The cap does not move on that basis** — a cheaper
+hour is not authority to buy more of them.
+
+**`vast.ai` was considered and is not recommended here.** It is a marketplace of
+third-party machines. Running there means placing a PAT for a private repository
+whose value is its dated commit timeline, plus a W&B key and eventually GCS
+credentials, on hardware we do not control. Its verified/datacenter tier
+mitigates this; community hosts do not. The saving does not pay for the exposure.
+
+### 9.4 A 40GB card may be enough — verify before booking 80GB
+
+§7's assumption 1 and §5 both presume an 80 GB card. That figure is the vendor's
+**training** footprint at the vendor's batch sizes. At the settings this project
+actually runs — `global_batch_size=1`, `seq_length=8192`, `mini_batch_size=1024` —
+a parameter-count reconstruction of §2.1's formula (revalidated against its three
+published rows) puts 1B at roughly:
+
+| Path | Estimate | What it includes |
+|---|---|---|
+| via `trustgate.eval.vendor_bind` | **≈ 13 GB** fp32, ≈ 7.5 GB bf16 | params + the `transformer.py:685` state copy + per-chunk logits |
+| via unmodified `train.py` | **≈ 25 GB** fp32 | the above plus the outer AdamW state `train.py:200` allocates before the eval branch returns and never uses |
+
+**This is an estimate, not a measurement, and it has never run.** If it holds, an
+A100 40GB at ₹84/hr covers both T1.6 and T1.10 and roughly halves the compute
+line. Confirm it on the box with one memory reading before booking anything
+larger — and if it is wrong, say so here rather than quietly renting up.
+
+### 9.5 IndiaAI Mission — the structurally right route, on a slow clock
+
+India's IndiaAI Mission operates a common compute facility offering subsidised
+GPU access at roughly **₹65–100/GPU-hour**, with 38,000+ GPUs onboarded.
+Students, academic institutions and early-stage researchers are explicitly named
+eligible categories. Applications go through the IndiaAI portal and are assessed
+by committee.
+
+Worth an application, with two caveats stated up front so nobody schedules
+against it: allocations favour declared national priorities (healthcare AI,
+agri-tech, vernacular language models), which a test-time-training security study
+may not match; and committee assessment is not a timeline anyone can plan around.
+**Apply in parallel. Do not make it the critical path.**
+
+### 9.6 What this section does not change
+
+Stated explicitly because the temptation runs the other way when a project is
+blocked:
+
+- **No pre-registered bar moves.** `PREREGISTERED.md` and `TOLERANCE.md` are
+  untouched. Standing Rule 5 forbids moving a bar after a result is seen; no
+  result has been seen, and none of the above is a result.
+- **The $325 cap stands**, at §7's figures, cheaper hours notwithstanding.
+- **"Blocked on access" is not a STOP.** A STOP is *we ran it and the attack did
+  not clear the bar*. If the 1B run never happens, the paper says which of the
+  two it was, in those words.
