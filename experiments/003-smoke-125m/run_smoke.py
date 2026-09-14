@@ -21,6 +21,7 @@ failures in one session rather than one per session.
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import os
@@ -230,8 +231,8 @@ def check_gpu(c):
 
 @check(
     "random-init-loss",
-    "If CE at init is not ln(vocab), the loss, the masking or the dtype is "
-    "wrong, and nothing downstream of it can be trusted.",
+    "If the FIRST chunk's CE is not ln(vocab), the loss, the masking or the "
+    "dtype is wrong, and nothing downstream of it can be trusted.",
 )
 def check_random_init_loss(c, cfg, model, state, mesh, tol=0.05):
     import jax.numpy as jnp
@@ -245,14 +246,39 @@ def check_random_init_loss(c, cfg, model, state, mesh, tol=0.05):
     )
 
     with mesh:
-        loss, _metrics = model.loss_for_sequence(seq, state)
-    observed = float(jnp.asarray(loss))
+        loss, metrics = model.loss_for_sequence(seq, state)
 
-    detail = f"CE {observed:.4f} nats vs ln({cfg.model.vocab_size}) = {expected:.4f}"
+    # The bar is the FIRST chunk, not the mean. `loss_for_sequence` returns
+    # `metrics[M.loss].mean()` in meta mode (`transformer.py:720`), and each
+    # chunk is scored after the inner loop has already adapted on the ones
+    # before it. Only chunk 0 is measured at initialisation; the mean is a
+    # partly-adapted quantity and is *expected* to sit below ln(vocab).
+    #
+    # Checking the mean against ln(vocab) -- as this did until 2026-09-15 --
+    # reports a working inner loop as a failure, and invites someone to "fix"
+    # the model until it matches a bar that does not describe it.
+    from ttt.model.transformer import MetaModel
+
+    per_chunk = [float(x) for x in jnp.asarray(metrics[MetaModel.MetricType.loss]).ravel()]
+    observed = per_chunk[0]
+    mean = float(jnp.asarray(loss))
+
+    curve = ", ".join(f"{v:.3f}" for v in per_chunk)
+    detail = (
+        f"chunk 0 CE {observed:.4f} nats vs ln({cfg.model.vocab_size}) = "
+        f"{expected:.4f}; mean over {len(per_chunk)} chunks {mean:.4f}; "
+        f"curve [{curve}]"
+    )
+    obs = dict(
+        observed_nats=observed,
+        expected_nats=expected,
+        mean_nats=mean,
+        per_chunk_nats=per_chunk,
+    )
     if abs(observed - expected) <= tol:
-        c.ok(detail, observed_nats=observed, expected_nats=expected)
+        c.ok(detail, **obs)
     else:
-        c.fail(detail + " -- outside tolerance", observed_nats=observed, expected_nats=expected)
+        c.fail(detail + " -- chunk 0 outside tolerance", **obs)
 
 
 @check(
@@ -318,6 +344,12 @@ def check_determinism(c, cfg, mesh):
         with mesh:
             loss, _ = model.loss_for_sequence(seq, state)
         losses.append(float(jnp.asarray(loss)))
+        # Drop the build before the next one. Holding both costs a second
+        # fp32 copy of the parameters -- 737 MB at 125M -- which is enough to
+        # push an 8 GB card into OOM on a run that otherwise fits. `float()`
+        # above has already pulled the only value we need back to the host.
+        del model, state, loss
+        gc.collect()
 
     if losses[0] == losses[1]:
         c.ok(f"bit-identical across two builds: {losses[0]:.6f}", losses=losses)
@@ -455,7 +487,12 @@ def code_revision() -> str:
         head = _git("rev-parse", "--short", "HEAD")
         if head.returncode != 0:
             return "unknown (git failed: " + head.stderr.strip()[:80] + ")"
-        dirty = _git("status", "--porcelain").stdout.strip()
+        # -c core.fileMode=false: this repo is routinely checked out on a
+        # Windows filesystem and run from WSL, where git sees different mode
+        # bits and reports every tracked file as modified. Without this the
+        # dirty marker fires on a clean tree, which is worse than not having
+        # it -- a marker that is always on carries no information.
+        dirty = _git("-c", "core.fileMode=false", "status", "--porcelain").stdout.strip()
         return head.stdout.strip() + (" +local-changes" if dirty else "")
     except Exception as exc:  # noqa: BLE001 - never block the run on this
         return "unknown (" + type(exc).__name__ + ")"
