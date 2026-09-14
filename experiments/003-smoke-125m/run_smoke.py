@@ -254,13 +254,29 @@ def check_random_init_loss(c, cfg, model, state, mesh, tol=0.05):
     "A mismatch means the config that built this model is not the config the "
     "analytic cost model was priced against (COST_MODEL.md section 2.1).",
 )
-def check_param_count(c, model):
+def check_param_count(c, model, binding):
+    """Counted against `binding.model_split`, not against `model`.
+
+    A freshly built `MetaModel` has **no `suffix_blocks` attribute at all**, so
+    `model.inner_parameters()` cannot match `spec_inner` and raises rather than
+    returning zero. `BlockCollectionSplit` is constructed *inside*
+    `loss_for_sequence` (`transformer.py:662-668`) and grafted onto the tree at
+    `:676`, on every call -- it is not part of model construction. Counting the
+    fast weights therefore requires a split model, which is exactly what
+    `vendor_bind.bind` already produces.
+
+    `trainable_parameters()` is safe on the unsplit tree: it filters on
+    `spec_outer`, which does not mention `suffix_blocks`.
+    """
     import jax
 
     trainable = sum(
         x.size for x in jax.tree_util.tree_leaves(model.trainable_parameters())
     )
-    inner = sum(x.size for x in jax.tree_util.tree_leaves(model.inner_parameters()))
+    inner = sum(
+        x.size
+        for x in jax.tree_util.tree_leaves(binding.model_split.inner_parameters())
+    )
     c.ok(
         f"{trainable:,} trainable, {inner:,} inner (fast) weights",
         trainable_params=int(trainable),
@@ -471,7 +487,6 @@ def main():
     model, state, mesh = build_model(cfg)
 
     check_random_init_loss(cfg, model, state, mesh)
-    check_param_count(model)
     check_determinism(cfg, mesh)
 
     from trustgate.eval import vendor_bind
@@ -479,6 +494,10 @@ def main():
 
     with mesh:
         binding = vendor_bind.bind(model, state)
+
+    # After bind, not before: the fast weights do not exist as an addressable
+    # subtree until the block split has happened. See check_param_count.
+    check_param_count(model, binding)
 
     check_inner_lr(binding)
 
