@@ -14,6 +14,7 @@ from trustgate.attack.corpus import TokenCorpus
 from trustgate.attack.stream import (
     CraftedStream,
     StreamStrategy,
+    assert_arms_distinguishable,
     assert_stream_not_from_eval_split,
     assert_streams_matched,
     build_benign_control,
@@ -312,7 +313,64 @@ def test_generate_seed_pairs_craft_fn_called_with_seed():
 
     def mock_craft_fn(seed):
         received_seeds.append(seed)
-        return None  # identity ordering
+        return None  # no ordering supplied -> falls back to the shuffle
 
     generate_seed_pairs(corpus, LENGTH, [5, 10, 15], craft_fn=mock_craft_fn, span_tokens=SPAN, mini_batch_size=MINI_BATCH)
     assert received_seeds == [5, 10, 15]
+
+
+def test_generate_seed_pairs_arms_are_never_identical():
+    """T2.6: the check every other pair test passes without making.
+
+    Both arms are built from the same seed, so they draw the same spans. If the
+    poison arm is also left unordered, the two streams are byte-identical --
+    which `assert_streams_matched` passes trivially, because identical streams
+    match on length, chunking, span size and dtype. The comparison is then
+    vacuous by construction and yields exactly zero corruption with every
+    structural check still green.
+    """
+    corpus = make_corpus()
+    pairs = generate_seed_pairs(corpus, LENGTH, [0, 1, 2, 3, 4], span_tokens=SPAN, mini_batch_size=MINI_BATCH)
+    for seed, (poison, control) in enumerate(pairs):
+        assert not np.array_equal(poison.tokens, control.tokens), (
+            f"seed {seed}: poison and control are the same bytes"
+        )
+
+
+def test_generate_seed_pairs_arms_hold_the_same_spans_reordered():
+    """Same seed on both arms is deliberate: it isolates ordering.
+
+    `order_fn` is asserted to permute rather than resize, so ordering is the
+    attacker's only lever in SELECT. Matching the *content* across arms removes
+    span choice as a confound, which is tighter than drawing the control from a
+    different seed.
+    """
+    corpus = make_corpus()
+    poison, control = generate_seed_pairs(
+        corpus, LENGTH, [3], span_tokens=SPAN, mini_batch_size=MINI_BATCH
+    )[0]
+    # Equal as multisets over whole spans, not equal in order. The lookahead
+    # token can differ (a different span lands last), so compare the body.
+    assert sorted(poison.tokens[:LENGTH].tolist()) == sorted(control.tokens[:LENGTH].tolist())
+
+
+def test_assert_arms_distinguishable_rejects_an_identical_pair():
+    """The failure direction, per T2.3's own convention of testing both ways."""
+    corpus = make_corpus()
+    stream = build_select_stream(corpus, LENGTH, 0, span_tokens=SPAN, mini_batch_size=MINI_BATCH)
+    with pytest.raises(ValueError, match="byte-identical"):
+        assert_arms_distinguishable(stream, stream, seed=0)
+
+
+def test_generate_seed_pairs_rejects_a_craft_fn_that_does_not_reorder():
+    """An identity `craft_fn` is an absent attack, not a weak one."""
+    corpus = make_corpus()
+    with pytest.raises(ValueError, match="byte-identical"):
+        generate_seed_pairs(
+            corpus,
+            LENGTH,
+            [0],
+            craft_fn=lambda seed: (lambda spans: list(spans)),
+            span_tokens=SPAN,
+            mini_batch_size=MINI_BATCH,
+        )

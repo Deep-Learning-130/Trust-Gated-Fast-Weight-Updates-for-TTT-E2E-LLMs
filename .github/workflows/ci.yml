@@ -113,3 +113,33 @@ jobs:
           done
           if [ "$missing" -eq 0 ]; then echo "ok: gate/ is still stubbed"; fi
           exit "$missing"
+
+      - name: Both pre-push guards allow the same remotes
+        run: |
+          # The guard's own comment says adding a remote "IS the decision ... a
+          # reviewed change to a tracked file". That argument only holds while
+          # there is one list. There are now two -- a POSIX guard and a
+          # PowerShell one for Windows -- and nothing stops a remote being
+          # recorded in one and not the other, which would leave whichever
+          # developer runs the other guard silently unprotected.
+          #
+          # Extract the github.com patterns from each and compare as sets.
+          sh_list=$(grep -oE "github\\\\\.com\[[^]]*\]\+[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+" \
+                      scripts/pre-push-guard.sh | sort -u)
+          ps_list=$(grep -oE "github\\\\\.com\[[^]]*\]\+[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+" \
+                      scripts/pre-push-guard.ps1 | sort -u)
+
+          if [ -z "$sh_list" ] || [ -z "$ps_list" ]; then
+            echo "::error::could not extract a remote allowlist from one of the guards"
+            echo "--- pre-push-guard.sh ---"; echo "$sh_list"
+            echo "--- pre-push-guard.ps1 ---"; echo "$ps_list"
+            exit 1
+          fi
+
+          if [ "$sh_list" != "$ps_list" ]; then
+            echo "::error::pre-push-guard.sh and .ps1 disagree about which remotes are decided"
+            diff <(echo "$sh_list") <(echo "$ps_list") || true
+            exit 1
+          fi
+          echo "ok: both guards allow the same remotes"
+          echo "$sh_list"
