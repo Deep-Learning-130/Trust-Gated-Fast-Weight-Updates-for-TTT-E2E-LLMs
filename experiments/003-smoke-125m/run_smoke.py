@@ -40,6 +40,23 @@ sys.path.insert(0, str(ROOT / "src"))
 # per chunk, and value_and_grad holds more than one).
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
+# This run is single-device by construction: n_data_parallel=1 and
+# n_state_parallel=1 below, and `ModelSharding.__init__` (sharding.py:33-35)
+# asserts their product equals `jax.device_count()`. On any box with more than
+# one accelerator -- Kaggle's T4 x2, a multi-GPU rental -- that assertion fires
+# during model construction, after the vendor stack has already been imported.
+#
+# The vendor's own knobs do NOT prevent this. `backend.local_device_ids` and
+# `backend.num_devices` are read only inside `if distributed_config.distributed:`
+# (jax_utils.py:44-48), and this runner sets `backend.distributed=false`, so both
+# are dead config here. CUDA_VISIBLE_DEVICES is the only lever that actually
+# changes what JAX enumerates, and it has to be set before jax is imported.
+#
+# setdefault, so an explicit `CUDA_VISIBLE_DEVICES=1` to pick a different card
+# still wins. Wanting several devices means changing n_data_parallel too, which
+# is a different experiment from this one.
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+
 
 @dataclass
 class Check:

@@ -68,14 +68,54 @@ an 8 GB card, `--seq-length 4096` still gives 4 inner steps.
 
 ### Hardware
 
-| | Local RTX 3070 Ti Laptop | Colab T4 (free) | Colab L4 / A100 |
-|---|---|---|---|
-| VRAM | 8 GB | 15 GB | 22 / 40 GB |
-| Native bf16 | yes (Ampere) | **no** (Turing) | yes |
-| JAX CUDA | **WSL2 only** — no Windows wheels | native | native |
+| | Local RTX 3070 Ti Laptop | Kaggle T4 x2 | Kaggle P100 | Colab |
+|---|---|---|---|---|
+| VRAM | 8 GB | 2 x 16 GB | 16 GB | 15 GB |
+| Native bf16 | yes (Ampere) | **no** (Turing) | **no** (Pascal) | **no** (T4) |
+| Devices JAX sees | 1 | **2 — see below** | 1 | 1 |
+| JAX CUDA | **WSL2 only** — no Windows wheels | native | native | native |
 
-Colab is the recommended primary: it removes the driver/toolkit variable, and
-15 GB gives headroom the 8 GB card does not.
+**Colab was tried on 2026-09-14 and does not work.** It runs Python 3.13 with
+JAX 0.11, against the vendor's `requires-python = ">=3.12"` and `jax[cuda12]<0.6`
+— roughly six releases apart. Either no cp313 wheel exists for JAX 0.5.x or pip
+drags `jaxlib` and the whole `nvidia-*` set backwards into a CUDA link that fails
+later and less legibly. Bumping the pin is not a fix: the carry overlay depends
+on JAX and equinox tree semantics and on `lax.scan` carry behaviour, so a pass
+against a different JAX would not transfer to the 1B run.
+
+**Kaggle works, via `uv`.** The vendor's README says it uses `uv` for package
+management, so fetching a standalone 3.12 sidesteps the host Python entirely
+rather than fighting it — which is more faithful to the vendor setup than
+`pip install` against whatever the notebook ships:
+
+```
+pip install uv
+uv venv --python 3.12 /kaggle/working/venv
+uv pip install --python /kaggle/working/venv/bin/python -e vendor/ttt-e2e
+```
+
+Two Kaggle-specific notes. Its `sitecustomize` imports `wrapt`, which a clean
+venv lacks; the resulting `ModuleNotFoundError` is printed and then ignored by
+the interpreter, and is not a failure. And **prefer P100 over T4 x2**, or accept
+that `CUDA_VISIBLE_DEVICES` is doing the work — see below.
+
+#### More than one visible accelerator will abort model construction
+
+`ModelSharding.__init__` (`sharding.py:33-35`) asserts
+`n_data_parallel * n_state_parallel == jax.device_count()`. This run is
+single-device by construction, so on a two-device box the assertion fires inside
+`build_model`, after the vendor stack has imported and a minute of startup has
+been spent.
+
+The vendor's own knobs do not prevent it. `backend.local_device_ids` and
+`backend.num_devices` are read only inside `if distributed_config.distributed:`
+(`jax_utils.py:44-48`), and this runner sets `backend.distributed=false` — so
+both are **dead config here**, despite being set. `run_smoke.py` therefore
+sets `CUDA_VISIBLE_DEVICES=0` itself, before importing jax, via `setdefault`
+so an explicit choice of card still wins.
+
+Worth carrying forward: the same dead-knob behaviour applies to any multi-GPU
+rental box, where the failure would land after billing had started.
 
 ### Config overrides, and why each one
 
