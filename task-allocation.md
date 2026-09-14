@@ -66,9 +66,35 @@ _Not in scope_ below.
 
 ## P1
 
+> ### Status note — 2026-09-14
+>
+> Statuses below are **read off the repository**, not reported by owners, except
+> T1.2 which cannot be. `DONE` means the acceptance criteria in the task were
+> checked and met; it does **not** mean merged. Eight branches are awaiting
+> review on `org`, and `main` does not yet carry most of this work.
+>
+> **T1.3 detail.** One of four sub-items is complete: `/train/zarr.json` is in
+> the copy list (`bootstrap_gpu_box.sh:190`) — the one whose absence kills a run
+> *after* billing starts. Separately, requester-pays was confirmed for free on
+> all three buckets (anonymous HTTP 400, "no user project provided"), which
+> settles a standing `COST_MODEL.md` assumption but completes no sub-item. The
+> remaining three all need a GCP billing project. Egress is priced under $2.
+>
+> **What P1 is actually blocked on.** Nothing in P1 is blocked on code any more.
+> T1.3 and T1.5 need a billing account, not a budget; T1.6 and T1.10 need an
+> accelerator. See `experiments/000-repro-baseline/COST_MODEL.md`.
+
 ### Priority Tasks
 
 **T1.1 — Commit the paper working tree** · `Priority P0` · depends: —
+
+> **Status (2026-09-14):** `DONE` (branch `exp/002-pilot-and-paper`, awaiting merge).
+> Two deviations, both deliberate. The branch name differs from the one named below.
+> And the third bullet — *"the tracked text claims no measurement anywhere"* — is no
+> longer true: the branch also lands Section IV and the pilot figures, so `main.tex`
+> and `p4-experiments-results.tex` now carry the 002 pilot's numbers while
+> `p3-intro-related-methodology.tex:1445` still declares the paper reports none.
+> That contradiction is real and is already **T1.12**'s explicit job to reconcile.
 
 - Branch `docs/paper-sections-1-3`; add `docs/paper/p3-intro-related-methodology.tex` and
   `intro-related-work.tex`.
@@ -79,12 +105,16 @@ _Not in scope_ below.
 **T1.2 — Procure the W&B entity, project and API key** _(TEAM_PLAN P0-10)_ · `Priority P0` ·
 depends: —
 
+> **Status (2026-09-14):** `REPORTED DONE` by P1 — not verifiable from the repo
+
 - Create the entity and project; generate the key; store it in a git-ignored `.env`.
 - Verify `wandb login` succeeds and an authenticated `api.runs()` query returns from a
   throwaway shell. `training.log_wandb=false` does not avoid this path (ADR-004 §3).
 - Post the entity/project names to P2 and P3 so nobody blocks on asking.
 
 **T1.3 — Verify the GCS paths and probe `/val`** · `Priority P0` · depends: T1.2
+
+> **Status (2026-09-14):** `PARTIAL` — see the status note
 
 - `gcloud auth login`; export `GCP_BILLING_PROJECT`. Both buckets are requester-pays.
 - `PROBE_ONLY=1 bash scripts/fetch_checkpoints.sh` — the first execution of the script and
@@ -96,6 +126,8 @@ depends: —
 
 **T1.4 — GPU session 1: provision, bootstrap, rehearse** _(TEAM_PLAN P0-1)_ · `Priority P0` ·
 depends: T1.3
+
+> **Status (2026-09-14):** `NOT STARTED` — free rehearsal prepped in `experiments/003-smoke-125m/`
 
 - Claim booking row #1 in `docs/protocols/gpu-bookings.md` **before** the instance starts:
   owner, task ID, hour estimate, budget.
@@ -109,11 +141,15 @@ depends: T1.3
 **T1.5 — Fetch and hash the 1B DCLM+Books @8K checkpoint** _(TEAM_PLAN P0-5)_ ·
 `Priority P0` · depends: T1.4
 
+> **Status (2026-09-14):** `BLOCKED` on a GCP billing project
+
 - Full `fetch_checkpoints.sh` run with `MAX_BYTES` set from the T1.3 probe.
 - sha256 manifest + byte size written to `experiments/000-repro-baseline/results/`.
 - Confirm `checkpoints/` is still git-ignored and nothing was force-added.
 
 **T1.6 — Run the unmodified vendor eval** _(TEAM_PLAN P1-1)_ · `Priority P0` · depends: T1.5
+
+> **Status (2026-09-14):** `BLOCKED` on T1.5 + an accelerator
 
 - Exactly the command in `EVAL_ENTRYPOINT.md`: `training.eval_mode=true` on `train`, base
   config `ext-1b-e2e-32K`, `seq_length=8192`.
@@ -123,6 +159,8 @@ depends: T1.3
 
 **T1.7 — Check the baseline against the pre-registered bar** _(TEAM_PLAN P1-2, P1-3)_ ·
 `Priority P0` · depends: T1.6
+
+> **Status (2026-09-14):** `BLOCKED` on T1.6
 
 - **Read `TOLERANCE.md` before reading the number** (Standing Rule 5).
 - Check all five: band `2.314 < loss < 2.805` nats/token; monotonically falling per-token
@@ -136,12 +174,16 @@ depends: T1.3
 **T1.8 — Implement `run_stream` and `eval_benign`** _(TEAM_PLAN P2-1)_ · `Priority P0` ·
 depends: T1.7
 
+> **Status (2026-09-14):** `DONE` (branch `eval/vendor-binding`, awaiting merge)
+
 - `train_mode="meta"` only; returns adapted fast weights.
 - Benign loss measured on held-out data, never on the stream itself.
 - Accepts the `RunCondition` produced by P3's harness half and the `CraftedStream` produced
   by P2's builders — settle both signatures with P2 and P3 before writing the bodies.
 
 **T1.9 — Implement `craft_stream`** _(TEAM_PLAN P2-2)_ · `Priority P0` · depends: T1.8,
+
+> **Status (2026-09-14):** `DONE for SELECT` (branch `attack/craft-stream-search`); PARAPHRASE/SOFT blocked on T2.5
 T2.2, T2.4, T3.2
 
 - Discrete search for SELECT/PARAPHRASE, embedding-space with projection for SOFT.
@@ -152,6 +194,8 @@ T2.2, T2.4, T3.2
 **T1.10 — GPU session 2: the five-seed poison and control runs** _(TEAM_PLAN P2-3)_ ·
 `Priority P0` · depends: T1.9, T2.6
 
+> **Status (2026-09-14):** `BLOCKED` on T1.7
+
 - Claim the booking row first. This is the longest serial block in the plan; estimate
   generously and announce overruns rather than absorbing them.
 - Five usable seeds per condition, both arms. No seed dropped without a written reason in
@@ -159,6 +203,8 @@ T2.2, T2.4, T3.2
 - Hand raw per-seed losses to P3 as they land so scoring runs in parallel, not after.
 
 **T1.11 — Make the PROCEED/STOP call** _(TEAM_PLAN P2-4)_ · `Priority P0` · depends: T1.10,
+
+> **Status (2026-09-14):** `BLOCKED` on T1.10
 T3.6
 
 - Verdict lands in `experiments/001-attack-spike/results/report.md`, generated by
@@ -169,6 +215,8 @@ T3.6
 
 **T1.12 — Paper results and final assembly** · `Priority P0` · depends: T1.11, T2.7, T3.10
 
+> **Status (2026-09-14):** `BLOCKED` on T1.11
+
 - Write Section IV (Results) around the verdict, and Section V (Discussion + Conclusion).
 - Reconcile Section III against what actually ran — including the sentence that currently
   promises no measurements, and any strategy that was not executed.
@@ -178,6 +226,8 @@ T3.6
 
 **T1.13 — Integration merge to `main`** _(TEAM_PLAN P4-3)_ · `Priority P1` · depends: T1.12
 
+> **Status (2026-09-14):** `IN PROGRESS` — 4 branch tips verified conflict-free against `main`
+
 - Review and merge every P2 and P3 branch. P1's own branches are reviewed and merged by P2
   or P3 — no self-merge in either direction.
 - Per the review checklist: `git -C vendor/ttt-e2e status` clean; CPU tests green; no
@@ -186,6 +236,8 @@ T3.6
 - Confirm the passthrough gate is still a provable no-op.
 
 **T1.14 — Update the invention disclosure** · `Priority P1` · depends: T1.11
+
+> **Status (2026-09-14):** `NOT STARTED` — needs T1.11
 
 - §8: real numbers and file references, or the STOP result stated plainly.
 - §7: state the drift granularity **actually enforced today** — the accumulator and store

@@ -152,13 +152,21 @@ def test_fewer_than_two_spans_raises():
 
 
 def test_fluency_penalty_is_subtracted_from_the_objective():
-    base = fluency_penalised(lambda stream: 10.0, lambda stream: 2.0, 1.5)
+    base = fluency_penalised(
+        lambda stream: 10.0, lambda poison, control: 2.0, 1.5, control=object()
+    )
     assert base(None) == pytest.approx(10.0 - 1.5 * 2.0)
 
 
 def test_zero_weight_leaves_the_objective_untouched():
     obj = lambda stream: 10.0  # noqa: E731
-    assert fluency_penalised(obj, lambda stream: 99.0, 0.0) is obj
+    assert fluency_penalised(obj, lambda p, c: 99.0, 0.0) is obj
+
+
+def test_fluency_scoring_without_a_control_is_refused():
+    """The bar is a ratio; it is not defined on a single stream."""
+    with pytest.raises(ValueError, match="needs the control arm"):
+        fluency_penalised(lambda s: 1.0, lambda p, c: 2.0, 1.0, control=None)
 
 
 def test_craft_refuses_a_nonzero_fluency_weight_with_no_scorer():
@@ -180,6 +188,26 @@ def test_craft_refuses_a_nonzero_fluency_weight_with_no_scorer():
 # ---------------------------------------------------------------------------
 # craft_stream -- assembly, and the seams that stay closed
 # ---------------------------------------------------------------------------
+
+
+def recording_scorer(poison_ppl=12.0, control_ppl=10.0, calls=None):
+    """Stands in for `eval.fluency.StreamFluencyScorer`, including the mutation.
+
+    The real scorer records both perplexities onto the streams and returns the
+    ratio; a stand-in that only returned a number would let the bug this
+    fixture exists to catch pass again.
+    """
+
+    def score(poison, control):
+        if calls is not None:
+            calls.append((poison, control))
+        poison.perplexity = poison_ppl
+        poison.control_perplexity = control_ppl
+        control.perplexity = control_ppl
+        control.control_perplexity = control_ppl
+        return poison.fluency_ratio
+
+    return score
 
 
 def craft(**kw):
@@ -277,3 +305,61 @@ def test_trigger_crafting_remains_blocked():
             span_tokens=SPAN,
             mini_batch_size=MINI_BATCH,
         )
+
+
+# ---------------------------------------------------------------------------
+# T1.9's fourth criterion: the returned stream must actually be scored
+# ---------------------------------------------------------------------------
+
+
+def test_the_returned_stream_has_both_perplexities_filled():
+    """T1.9: "returns a CraftedStream with both perplexity and
+    control_perplexity filled".
+
+    The streams scored during the search are candidates that get discarded;
+    the winner is rebuilt fresh and carries no scores. Without an explicit
+    final scoring pass both fields stay `nan` and `is_scored` stays False --
+    which fails safe, but means the crafted arm can never pass the realism bar
+    at all. That is not a bar, it is a wall.
+    """
+    result = craft(
+        spec=AttackSpec(objective=Objective.DEGRADE, stream_tokens=LENGTH, fluency_weight=1.0),
+        fluency_scorer=recording_scorer(),
+    )
+    assert result.stream.is_scored
+    assert result.stream.perplexity == pytest.approx(12.0)
+    assert result.stream.control_perplexity == pytest.approx(10.0)
+    assert result.stream.fluency_ratio == pytest.approx(1.2)
+
+
+def test_the_control_arm_is_returned_and_scored():
+    result = craft(
+        spec=AttackSpec(objective=Objective.DEGRADE, stream_tokens=LENGTH, fluency_weight=1.0),
+        fluency_scorer=recording_scorer(),
+    )
+    assert result.control is not None
+    assert result.control.is_scored
+    assert len(result.control.tokens) == len(result.stream.tokens)
+
+
+def test_the_control_is_held_fixed_across_the_whole_search():
+    """If the control moved per proposal, the attacker could lower the ratio by
+    making the control look worse rather than the poison look better, and the
+    realism bar would stop measuring realism."""
+    calls = []
+    result = craft(
+        spec=AttackSpec(objective=Objective.DEGRADE, stream_tokens=LENGTH, fluency_weight=1.0),
+        fluency_scorer=recording_scorer(calls=calls),
+    )
+    assert len(calls) > 1
+    controls = {id(c) for _, c in calls}
+    assert len(controls) == 1
+    assert id(result.control) in controls
+
+
+def test_an_unscored_craft_leaves_the_stream_failing_safe():
+    """fluency_weight=0.0 is the documented diagnostic upper bound. It must not
+    silently mark the stream as realistic."""
+    result = craft()  # fluency_weight=0.0, no scorer
+    assert not result.stream.is_scored
+    assert not (result.stream.fluency_ratio <= 1.5)

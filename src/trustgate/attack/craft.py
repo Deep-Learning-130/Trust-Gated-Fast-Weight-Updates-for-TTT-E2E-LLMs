@@ -59,6 +59,7 @@ from trustgate.attack.objectives import AttackSpec, Objective
 from trustgate.attack.stream import (
     CraftedStream,
     StreamStrategy,
+    build_benign_control,
     build_select_stream,
 )
 
@@ -77,6 +78,15 @@ StreamObjective = Callable[[CraftedStream], float]
 #: The spans-level callable `search_order` hill-climbs. `craft_stream` builds it
 #: by composing a `StreamObjective` with the stream builder.
 SpanObjective = Callable[[Sequence[Span]], float]
+
+#: Scores the realism bar: `(poison, control) -> perplexity ratio`.
+#:
+#: This is `eval.fluency.StreamFluencyScorer.__call__`'s signature, and taking
+#: both arms is not incidental. The bar is a *ratio*, so a single stream cannot
+#: produce it -- and the scorer records `perplexity` and `control_perplexity`
+#: onto the streams by mutation, which is the only way `CraftedStream.is_scored`
+#: ever becomes True. A one-argument scorer leaves both fields `nan` forever.
+FluencyScorer = Callable[[CraftedStream, CraftedStream], float]
 
 
 @dataclass
@@ -125,6 +135,11 @@ class CraftResult:
     """Best-so-far after each evaluation. A flat curve says the lever does not
     move the victim, which is a finding about the threat model rather than a
     failure of the run."""
+
+    control: CraftedStream | None = None
+    """The length-matched benign arm the fluency ratio was taken against, held
+    fixed across the search. Returned so the caller measures against the same
+    control the attacker was scored on rather than rebuilding its own."""
 
     @property
     def gain(self) -> float:
@@ -223,8 +238,9 @@ def search_order(
 
 def fluency_penalised(
     objective: StreamObjective,
-    fluency_scorer: Callable[[CraftedStream], float] | None,
+    fluency_scorer: FluencyScorer | None,
     fluency_weight: float,
+    control: CraftedStream | None = None,
 ) -> StreamObjective:
     """Fold the fluency term into the objective, per the module docstring.
 
@@ -241,9 +257,17 @@ def fluency_penalised(
     """
     if fluency_scorer is None or fluency_weight == 0.0:
         return objective
+    if control is None:
+        raise ValueError(
+            "fluency scoring needs the control arm: the bar is a ratio of "
+            "poison perplexity to control perplexity, so it is not defined on "
+            "one stream."
+        )
 
     def penalised(stream: CraftedStream) -> float:
-        return float(objective(stream)) - fluency_weight * float(fluency_scorer(stream))
+        return float(objective(stream)) - fluency_weight * float(
+            fluency_scorer(stream, control)
+        )
 
     return penalised
 
@@ -256,7 +280,7 @@ def craft_stream(
     seed: int,
     *,
     objective: StreamObjective | None = None,
-    fluency_scorer: Callable[[CraftedStream], float] | None = None,
+    fluency_scorer: FluencyScorer | None = None,
     span_tokens: int = DEFAULT_SPAN_TOKENS,
     mini_batch_size: int = 1024,
     offset_range: tuple[int, int] | None = None,
@@ -341,7 +365,21 @@ def craft_stream(
     # begins and cannot drift as a side effect of the search.
     seeded = build(None)
 
-    scored = fluency_penalised(objective, fluency_scorer, spec.fluency_weight)
+    # The control arm, built by the identical procedure at the same seed. It is
+    # the denominator of the fluency ratio and it is held FIXED across the
+    # search: if the control moved with each proposal, the attacker could lower
+    # the ratio by making the control look worse instead of making the poison
+    # look better, and the realism bar would stop measuring realism.
+    control = build_benign_control(
+        corpus,
+        spec.stream_tokens,
+        seed,
+        span_tokens=span_tokens,
+        mini_batch_size=mini_batch_size,
+        offset_range=offset_range,
+    )
+
+    scored = fluency_penalised(objective, fluency_scorer, spec.fluency_weight, control)
 
     def score_spans(order: Sequence[Span]) -> float:
         return float(scored(build(order)))
@@ -355,7 +393,19 @@ def craft_stream(
     )
 
     crafted = build(result.spans)
+
+    # Score the winner. The streams scored during the search were candidates
+    # that have been discarded; `crafted` is rebuilt fresh and carries no
+    # scores, so without this its `perplexity` and `control_perplexity` stay
+    # `nan` and `is_scored` stays False. That fails safe -- `nan <= 1.5` is
+    # False, so an unscored stream cannot pass the realism bar -- but it would
+    # also mean the crafted arm could never pass it, which is not a bar, it is
+    # a wall. One extra reference-model call, and no victim call at all.
+    if fluency_scorer is not None:
+        fluency_scorer(crafted, control)
+
     result.stream = crafted
+    result.control = control
     # Report the ordering that was realised, not the one proposed:
     # `_resolve_lookahead` may have moved a span to secure the lookahead token.
     result.spans = crafted.spans
