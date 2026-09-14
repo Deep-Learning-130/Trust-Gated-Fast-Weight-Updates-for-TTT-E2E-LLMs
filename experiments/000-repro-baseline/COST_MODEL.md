@@ -161,6 +161,45 @@ last quarter, as the paper's ablation concluded.
 > checkpoint, rather than the random-init one in `experiments/003-smoke-125m/`, affordable
 > to the point of being free.
 
+### 2.1.1 What is actually inside the 125M checkpoint — fetched 2026-09-14
+
+The first real transfer of the project. 1.08 GB, $0.13 of egress, run by the
+holder of the billing account with `scripts/fetch_rehearsal_slice.sh`.
+
+```
+125m_ttt_e2e_finetune_books_8k_1x_cc/
+  119/                                    <- the step number, and the only step
+    _CHECKPOINT_METADATA
+    model_weights/
+      _METADATA  _sharding  manifest.ocdbt
+      array_metadatas/process_0
+      d/8eeede1dc0f0cb8c21d2957ceefcf4d8
+      ocdbt.process_0/{manifest.ocdbt, d/ x 6}
+```
+
+13 objects, 651.4 MiB, orbax OCDBT. sha256 of the tree (files sorted, hashed,
+hashes hashed): `fa3788ced71ffe445e3710022cf420aa75f92540f78a85ac848181fd3cfce7ec`.
+
+**`load_part=params` is mandatory, and `load_part=all` will fail.** The released
+tree contains `model_weights` and nothing else — no `opt_state`, no
+`train_ds_iter`. `Checkpointer.load_checkpoint` (`infra/checkpoint.py:129-142`)
+reads `item_metadata(step)["opt_state"]` on the `all` branch before it restores
+anything, so `all` dies on a KeyError against a checkpoint that is not missing
+anything it was supposed to have. This is a first-launch failure that would
+otherwise have been found on a paid box, after billing started.
+
+`resume_checkpoint_dir` points at the directory **containing** `119`, not at
+`119` itself: `CheckpointManager` discovers the step via `latest_step()`.
+
+### 2.1.2 The uncompressed-zarr deduction, confirmed against bytes
+
+`val/c/0` transferred at **381.5 MiB = 400,000,000 bytes**, matching 2.2's
+prediction of 100,000,000 uint32 tokens per chunk exactly. The store root and
+both metadata documents came back at 99 B, 517 B and 518 B.
+
+`train/zarr.json` is **PRESENT** (518 B). The first probe reported it missing;
+that was 1.1's path error, not an absent object, and 1.1 is already corrected.
+
 ### 2.2 Dataset — the one genuinely unknown quantity
 
 The `/val` token count is **not derivable** from the paper or the code. Tokens are int32
