@@ -239,7 +239,26 @@ def check_random_init_loss(c, cfg, model, state, mesh, tol=0.05):
 
     from trustgate.eval import vendor_bind
 
-    expected = math.log(cfg.model.vocab_size)
+    # ln(vocab) is the CE of a *uniform* predictive distribution, and a
+    # random-init model is not uniform. With tied embeddings the logits are
+    # h @ E.T, where the final RMSNorm leaves h at unit second moment and E is
+    # initialised N(0, initializer_range^2). So each logit has variance
+    # hidden_size * initializer_range^2, and for large V
+    #
+    #     E[CE] = E[logsumexp(z)] - E[z_target] ~= ln(V) + sigma^2 / 2
+    #
+    # At this config that is 11.7618 + 0.1536 = 11.9154 against an observed
+    # 11.8858 -- a residual of -0.030, inside the existing tolerance.
+    #
+    # This correction was added 2026-09-15, AFTER seeing 11.8858 fail against a
+    # bare ln(V). It is a derivation from two config values rather than a bar
+    # widened to fit: it predicts a value 0.030 ABOVE what was observed, and it
+    # would fail just as loudly if the loss were wrong in the other direction.
+    # Nothing pre-registered is touched -- this is an instrument check, and
+    # Standing Rule 5 governs PREREGISTERED.md, not this file.
+    uniform = math.log(cfg.model.vocab_size)
+    init_logit_var = cfg.model.hidden_size * cfg.model.initializer_range**2
+    expected = uniform + init_logit_var / 2
     seq = vendor_bind.make_batch(
         dummy_tokens(cfg.training.seq_length + 1, seed=0),
         bos_token_id=cfg.model.bos_token_id,
@@ -264,16 +283,21 @@ def check_random_init_loss(c, cfg, model, state, mesh, tol=0.05):
     mean = float(jnp.asarray(loss))
 
     curve = ", ".join(f"{v:.3f}" for v in per_chunk)
+    drop = per_chunk[0] - min(per_chunk)
     detail = (
-        f"chunk 0 CE {observed:.4f} nats vs ln({cfg.model.vocab_size}) = "
-        f"{expected:.4f}; mean over {len(per_chunk)} chunks {mean:.4f}; "
-        f"curve [{curve}]"
+        f"chunk 0 CE {observed:.4f} vs expected {expected:.4f} "
+        f"(= ln {cfg.model.vocab_size} + init logit var/2 = {uniform:.4f} + "
+        f"{init_logit_var / 2:.4f}); mean over {len(per_chunk)} chunks "
+        f"{mean:.4f}, falling {drop:.3f} nats; curve [{curve}]"
     )
     obs = dict(
         observed_nats=observed,
         expected_nats=expected,
+        uniform_nats=uniform,
+        init_logit_var=init_logit_var,
         mean_nats=mean,
         per_chunk_nats=per_chunk,
+        inner_loop_drop_nats=drop,
     )
     if abs(observed - expected) <= tol:
         c.ok(detail, **obs)
@@ -568,7 +592,6 @@ def main():
     model, state, mesh = build_model(cfg)
 
     check_random_init_loss(cfg, model, state, mesh)
-    check_determinism(cfg, mesh)
 
     from trustgate.eval import vendor_bind
     from trustgate.eval.harness import RunCondition, eval_tokens_digest
@@ -611,6 +634,14 @@ def main():
     check_carry(cfg, binding, mesh, condition, stream, adapted)
     if "carry" in adapted:
         check_eval_differs(binding, mesh, adapted["carry"], eval_tokens, condition)
+
+    # Determinism runs LAST, and deliberately. It is the only check that builds
+    # a second model, so on a card where memory is tight it is the one most
+    # likely to fail -- and it is also the least important. Running it before
+    # the carry check meant an 8 GB box spent its last free bytes proving the
+    # forward pass was reproducible and then had nothing left for the check the
+    # whole experiment exists for.
+    check_determinism(cfg, mesh)
 
     # ---- report ----
     print("\n" + "=" * 72)
