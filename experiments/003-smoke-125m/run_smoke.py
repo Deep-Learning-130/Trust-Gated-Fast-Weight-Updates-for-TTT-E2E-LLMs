@@ -146,8 +146,14 @@ def build_config(args):
         'backend.local_device_ids="0"',
     ]
     if args.compute_dtype:
-        # T4 is Turing: no native bf16. Override to fp32 there and record it.
         overrides.append(f"model.compute_dtype={args.compute_dtype}")
+    if args.param_dtype:
+        # `qk_norm` defaults True (config.py:115) and q_norm/k_norm are built at
+        # param_dtype (attention.py:100-101), which defaults to fp32. Normalising
+        # a bf16 xq against an fp32 weight promotes the result back to fp32, and
+        # the prefix path then hands it to a cuDNN kernel that takes fp16/bf16
+        # only. Setting compute_dtype alone may therefore not be enough.
+        overrides.append(f"model.param_dtype={args.param_dtype}")
 
     with initialize_config_dir(config_dir=str(VENDOR_CONFIGS), version_base=None):
         cfg = compose(config_name="config", overrides=overrides)
@@ -445,8 +451,16 @@ def main():
     ap.add_argument(
         "--compute-dtype",
         default=None,
-        help="Override model.compute_dtype. Use fp32 on a T4 (Turing has no "
-        "native bf16). Recorded in the results either way.",
+        help="Override model.compute_dtype (vendor default bf16). NOTE: fp32 "
+        "cannot work -- the prefix path forces a cuDNN kernel that takes "
+        "fp16/bf16 only. Recorded in the results either way.",
+    )
+    ap.add_argument(
+        "--param-dtype",
+        default=None,
+        help="Override model.param_dtype (vendor default fp32). Try bf16 if the "
+        "attention kernel still reports float32 with compute_dtype at bf16: "
+        "qk_norm runs at param_dtype and promotes xq back up. Recorded.",
     )
     ap.add_argument("--exp-dir", default="/tmp/trustgate-smoke")
     ap.add_argument("--out", default=str(RESULTS / "smoke.json"))
@@ -562,6 +576,7 @@ def main():
                     "stream_sequences": args.stream_sequences,
                     "mini_batch_size": binding.mini_batch_size,
                     "compute_dtype": args.compute_dtype or "bf16 (config default)",
+                    "param_dtype": args.param_dtype or "fp32 (config default)",
                     "suffix_len": binding.suffix_len,
                 },
                 "checks": [
