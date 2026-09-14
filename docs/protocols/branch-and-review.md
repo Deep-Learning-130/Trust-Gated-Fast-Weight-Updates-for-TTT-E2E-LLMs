@@ -44,12 +44,14 @@ In order. The first four are mechanical and non-negotiable; the rest need judgem
 
 1. **`git -C vendor/ttt-e2e status` is clean.** ADR-002: the vendor tree has no licence and
    must never be edited. Any diff inside `vendor/` blocks the merge outright.
-2. **CPU tests pass:** `PYTHONPATH=src JAX_PLATFORMS=cpu pytest` — as of 2026-08-27,
-   **186 passed / 11 skipped** with no reference model fetched (what CI sees), and
-   **197 passed** once `scripts/fetch_reference_model.py` has run. The skips are the opt-in
-   GPT-2 tests, gated on the 548MB weights and therefore never run in CI. The count is
-   expected to grow; a branch that *reduces* it is the thing to question, and a branch that
-   changes it without updating this line makes the check a lie.
+2. **CPU tests pass:** `PYTHONPATH=src JAX_PLATFORMS=cpu pytest` — as of 2026-09-14,
+   **244 passed / 11 skipped** with no reference model fetched (what CI sees), and
+   **255 passed** once `scripts/fetch_reference_model.py` has run. The skips are the opt-in
+   GPT-2 tests, gated on the 548MB weights and therefore never run in CI. Quote both numbers
+   or the check is unfalsifiable: a single figure matches neither environment, so nobody can
+   tell a real regression from a missing download. The count is expected to grow; a branch
+   that *reduces* it is the thing to question, and a branch that changes it without updating
+   this line makes the check a lie.
 3. **No `gate/` code before the Phase 1 spike returns PROCEED** (Rule 2). Gate work is sunk
    cost if the verdict is STOP. Attack machinery is fine early; it is needed either way.
    (This previously read "before Phase 2 returns PROCEED", which was muddled — Phase **1**
@@ -98,5 +100,5 @@ Both workers acknowledge this document before their first push. Record it here.
 | Person | Role | Acknowledged | Date |
 |---|---|---|---|
 | Person 1 | Lead | — | — |
-| Person 2 | Worker A | — | — |
+| Person 2 | Worker A | ✓ | 2026-09-12 |
 | Person 3 | Worker B | — | — |
