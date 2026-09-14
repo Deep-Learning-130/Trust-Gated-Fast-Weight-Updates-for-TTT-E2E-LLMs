@@ -127,12 +127,32 @@ every prefix block, so **cuDNN fused attention is used regardless of the flag**.
 It accepts only fp16/bf16. There is therefore no card on which `fp32` runs this
 model, and `force_flash: False` does not mean what it appears to mean.
 
-The consequence, pending confirmation from a bf16 run: cuDNN fused attention
-requires **Ampere (SM80) or newer**. If that holds, Turing (T4, SM75), Pascal
-(P100, SM60) and Volta (V100, SM70) are all excluded, and the RTX 3070 Ti
-laptop (SM86) is the only free hardware available to this project that can run
-the prefix pass at all — despite having the least memory of the candidates.
-State the result here either way once the bf16 run lands.
+**Settled 2026-09-15 on Kaggle T4, runner revision `45c0983`.** With the dtype
+corrected to the bf16 default, the rejection moved from the dtype check to the
+kernel search itself:
+
+```
+XlaRuntimeError: INTERNAL: No valid engine configs for Matmul_MUL_GEN_INDEX_...
+in external/xla/xla/stream_executor/cuda/cuda_dnn.cc(8629):
+  'graph_.create_execution_plans({cudnn_frontend::HeurMode_t::A})'
+```
+
+That is cuDNN reporting it has **no engine for this graph on this GPU**. The
+dtype error was masking it. cuDNN fused attention requires **Ampere (SM80) or
+newer**, so Turing (T4, SM75), Pascal (P100, SM60) and Volta (V100, SM70) are
+all excluded — and because `implementation="cudnn"` is an explicit request
+rather than a hint, there is nothing for it to fall back to.
+
+**Consequence: the RTX 3070 Ti laptop (SM86) is the only free hardware this
+project has that can execute the prefix pass at all**, despite having the least
+memory of every candidate considered. Kaggle is out for this model on every
+accelerator it offers: both its GPUs are pre-Ampere, and its TPU cannot service
+a CUDA kernel request at all.
+
+Not worked around, and deliberately so. Setting `suffix_len` to the layer count
+would leave no prefix blocks and therefore no cuDNN call, but it would also make
+every block adaptive — a different architecture, not a cheaper view of this one.
+The only other lever is editing `attention.py`, which ADR-002 forbids.
 
 #### More than one visible accelerator will abort model construction
 
@@ -203,6 +223,28 @@ language model and that no number from it transfers.
 matters. Git-ignored. Its first key is a `disclaimer` field, so a number lifted
 out of it carries its own caveat.
 
+## What has actually been measured
+
+`param-count`, on Kaggle T4, runner `45c0983` — the first real numbers off the
+vendor model rather than off a formula:
+
+| | observed | reconstructed |
+|---|---|---|
+| trainable params | **184,363,776** | matches to within the RMSNorm weights |
+| inner (fast) weights | **11,501,568** | 3 × 3 × 768 × 1664 — **exact** |
+
+The inner count reconstructs exactly: `suffix_len: 3`, and each suffix block's
+`feed_forward_prime` is a SwiGLU holding three 768 × 1664 matrices, so
+3 × 3,833,856 = 11,501,568. `COST_MODEL.md` §2.1's analytic model is validated
+at 125M against a real build.
+
+**6.2% of the model is fast weights.** That is the entire attack surface this
+project is about, and it is the first time the figure has been anything other
+than an estimate.
+
+Nothing downstream of a forward pass has a number yet. Those are blocked on
+hardware, not on arithmetic.
+
 ## First-launch failures found so far
 
 **This list is the deliverable.** Every row is a failure that would otherwise
@@ -215,8 +257,9 @@ as the run progresses; a row is only removed if it turns out to be wrong.
 | 1 | Colab: Python 3.13 + JAX 0.11 against `requires-python >=3.12` and `jax[cuda12]<0.6` | `pip install` | not fixable on Colab; `uv` with a standalone 3.12 elsewhere |
 | 2 | `load_part=all` raises on the released checkpoint | after restore begins | `load_part=params` — the tree has `model_weights` only, no `opt_state` |
 | 3 | `backend.local_device_ids` / `num_devices` are dead unless `distributed=true` | `ModelSharding.__init__`, during model construction | `CUDA_VISIBLE_DEVICES`, set before jax imports |
-| 4 | `force_flash: False` does not disable cuDNN on prefix blocks; fp32 rejected | first forward pass | bf16 only, and probably Ampere-only hardware |
+| 4 | `force_flash: False` does not disable cuDNN on prefix blocks; fp32 rejected | first forward pass | bf16 only — and **confirmed Ampere-only**, see below |
 | 5 | `param-count` raised instead of reporting, because `suffix_blocks` does not exist pre-split | our own check | count against `binding.model_split` |
+| 6 | a stale checkout read as a persistent technical failure for three sessions | everywhere, silently | `run_smoke.py` prints its own revision |
 
 Rows 2, 3 and 4 share a shape worth naming: **the configuration reads as
 correct and is not.** `load_part=all` is a documented option, `local_device_ids`
