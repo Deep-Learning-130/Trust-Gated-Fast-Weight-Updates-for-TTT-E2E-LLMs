@@ -74,6 +74,32 @@ billing risk; it is a **crash risk**, and the mitigation above removes it. D5 im
 store), fall back to the vendor README's full `gcloud storage cp -r`, and re-probe first,
 because that is a much larger transfer.
 
+> **Probed 2026-09-14 with a real billing account (P3's). The layout above is WRONG.**
+>
+> - `gsutil du -s gs://llama3-books3/val` returned **no bytes** — the command succeeded,
+>   the prefix is empty. Not a permissions or billing failure: the checkpoint probes in the
+>   same run, against the same project, succeeded.
+> - `gsutil ls gs://llama3-books3/train/zarr.json` returned **"One or more URLs matched no
+>   objects."**
+>
+> So all three `gsutil` lines above would fail. The paragraph's own escape hatch — *"if the
+> layout differs, fall back to the vendor README's full `gcloud storage cp -r`, and re-probe
+> first"* — is now the live path, and the re-probe is a **bucket listing**, still pending.
+>
+> What is *not* in doubt: the bucket name. `vendor/ttt-e2e/README.md:37` gives
+> `gs://llama3-books3` verbatim, the August anonymous probe got HTTP 400 (requester-pays,
+> bucket exists), and P3's account reaches it. The array names are not in doubt either —
+> `ttt/config.py:158-159` sets `data_split: "train"` and `eval_split: "val"`, and
+> `dataloader/lm_dataset.py:16` opens `zarr.open_array(store, path=f"/{split}")`. **What is
+> wrong is where those arrays sit inside the bucket.** The vendor README's own instruction
+> (`gcloud storage cp -r gs://llama3-books3/ llama3-books3`) copies the *whole* bucket into
+> a directory and points `deploy_paths` at it, which is consistent with the arrays being
+> nested a level down rather than at the root.
+>
+> **This is the probe earning its keep.** Every one of these failures would otherwise have
+> happened on a rented box, after billing started, which is the exact scenario this section
+> was written to prevent.
+
 ---
 
 ## 2. Bytes — estimated, pending the probe
@@ -99,6 +125,23 @@ Parameters counted analytically from the config the checkpoint was trained under
 92.0M against the paper's stated **88M** (§2.3.1) — **+4.6%**. Treat every figure above as
 ±10%. Note also that `suffix_len` is 6 of 24 layers for 1B and 8 of 32 for 3B: exactly the
 last quarter, as the paper's ablation concluded.
+
+> **Measured 2026-09-14** (P3's billing account, metadata only, nothing transferred):
+>
+> | checkpoint | estimated | **measured** | error | egress @ $0.12/GB |
+> |---|---|---|---|---|
+> | 1B books@8K | 5.9 GB | **5,347,020,507 B = 5.35 GB** | **−9.4%** | $0.64 |
+> | 125M books@8K | — | **683,046,332 B = 0.68 GB** | — | $0.08 |
+>
+> The analytic estimate holds, but **only just** — −9.4% against a stated ±10% band. Treat
+> the band as real rather than conservative; the 3B figure above (≈11.6 GB) carries the same
+> formula and the same uncertainty, and it has not been measured.
+>
+> Consequences: `MAX_BYTES=40000000000` in `scripts/fetch_checkpoints.sh` is ~7.5× the
+> actual size, so the guard will not fire spuriously. And the 125M checkpoint is real,
+> reachable and costs **$0.08** — which makes a full end-to-end rehearsal on a *real*
+> checkpoint, rather than the random-init one in `experiments/003-smoke-125m/`, affordable
+> to the point of being free.
 
 ### 2.2 Dataset — the one genuinely unknown quantity
 
@@ -302,6 +345,7 @@ moment.
 | 2026-08-08 | Initial. All figures estimated; nothing probed, rented or spent. | — |
 | 2026-09-14 | §1 requester-pays verified anonymously at zero cost, all three buckets. | Settled a standing assumption without auth or spend. |
 | 2026-09-14 | Added §9 (access routes). No cap, bar or estimate above it changed. | The first GCP billing signup was denied; the routes needed recording where the next person looks. |
+| 2026-09-14 | §2.1 checkpoint sizes **measured** (1B = 5.35 GB, −9.4% vs estimate; 125M = 0.68 GB). §1.1's store layout **falsified**. | First probe with a real billing account, supplied by P3. |
 
 ---
 
