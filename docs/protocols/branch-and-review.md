@@ -99,6 +99,6 @@ Both workers acknowledge this document before their first push. Record it here.
 
 | Person | Role | Acknowledged | Date |
 |---|---|---|---|
-| Person 1 | Lead | — | — |
+| Person 1 | Lead | ✓ | 2026-09-14 |
 | Person 2 | Worker A | ✓ | 2026-09-12 |
-| Person 3 | Worker B | — | — |
+| Person 3 | Worker B | ✓ | 2026-09-14 |

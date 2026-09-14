@@ -14,5 +14,17 @@ honest about what is old.
 **Our novelty is the defense on the fast-weight-LLM setting, not the attack.**
 What is arguably new on the attack side — poisoning TTT-E2E fast weights
 *specifically* — is a research contribution and a motivation for the defense, but
-we lead the filing with the gate. TO COMPLETE: per-paper mechanism notes and the
-exact diff of our crafted-stream constraint vs. 2410.04682.
+we lead the filing with the gate.
+
+## Per-Paper Mechanism Notes
+
+- **2308.08505**: Demonstrates foundational vulnerability of TTA by injecting malicious gradients via input modifications. Primarily targets classification models using white-box gradients to maximize loss on subsequent benign batches.
+- **2410.04682**: Highlights the necessity of stealth. It argues that obvious adversarial perturbations are easily filtered. For text, it constrains adversarial generation to maintain fluency (often using simple post-hoc filtering or bounding perplexity degradation).
+- **2412.01154**: Operates in a black-box setting for continual TTA. Relies on query feedback rather than full gradient access to construct the poison sequence over time.
+
+## Diff: Our Crafted-Stream Constraint vs. 2410.04682
+
+While 2410.04682 introduces realism constraints (such as fluency bounds for text), our crafted-stream constraint differs in the following ways:
+1. **Objective Integration**: Rather than acting as a post-hoc filter, our fluency weight sits directly inside the search objective during stream construction.
+2. **Independent Scoring**: We use an entirely independent reference model (GPT-2) to score fluency. 2410.04682 often relies on the victim model itself, which becomes circular when the victim's fast weights are actively adapting.
+3. **Sub-chunk Granularity**: Our constraint is tailored to the exact sub-chunk span sizes processed by the TTT-E2E inner loop (as detailed in ADR-007), rather than generic sequence-level constraints.
