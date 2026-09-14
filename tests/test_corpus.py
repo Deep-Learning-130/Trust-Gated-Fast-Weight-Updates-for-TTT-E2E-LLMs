@@ -191,3 +191,12 @@ def test_span_multiplicity_counts_repeats():
 def test_mean_offset_gap_measures_provenance_spread():
     assert mean_offset_gap([Span(0, 8), Span(100, 8), Span(200, 8)]) == 100.0
     assert mean_offset_gap([Span(0, 8)]) == 0.0
+
+
+@pytest.mark.parametrize("span_tokens", [16, 32, 64, 128])
+def test_sampled_span_length_is_exact_at_several_span_sizes(span_tokens):
+    corpus = make_corpus()
+    spans = corpus.sample_spans(4, span_tokens=span_tokens, seed=5)
+    assert all(s.length == span_tokens for s in spans)
+    assert all(len(corpus.read(s.offset, s.length)) == span_tokens for s in spans)
+    assert all(s.offset % span_tokens == 0 for s in spans)
