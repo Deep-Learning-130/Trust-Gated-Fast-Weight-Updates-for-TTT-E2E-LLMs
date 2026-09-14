@@ -575,6 +575,20 @@ def generate_seed_pairs(
 
     for seed in seeds:
         order_fn = craft_fn(seed) if craft_fn is not None else None
+        if order_fn is None:
+            # Both arms are built from the same seed, so they draw the *same
+            # spans* -- which is deliberate and is the tightest control
+            # available: `order_fn` is asserted to permute rather than resize,
+            # so ordering is the attacker's only lever here and matching the
+            # content isolates it exactly.
+            #
+            # The consequence is that a `None` ordering makes the poison arm
+            # byte-identical to its own control, which is not a weak attack --
+            # it is no comparison at all, and it flows into `run_attack_spike`
+            # as a guaranteed d = 0.0 that every structural check passes.
+            # Fall back to a deterministic shuffle, which is what this function
+            # documents `craft_fn=None` as meaning.
+            order_fn = _shuffled_order_fn(seed)
 
         poison = build_select_stream(
             corpus,
@@ -596,7 +610,67 @@ def generate_seed_pairs(
         )
 
         assert_streams_matched(poison, control)
+        assert_arms_distinguishable(poison, control, seed)
 
         pairs.append((poison, control))
 
     return pairs
+
+
+#: Offset so the shuffle RNG cannot collide with the span-sampling RNG for the
+#: same seed. Arbitrary but fixed: changing it changes every generated stream.
+_SHUFFLE_SEED_OFFSET = 1_000_003
+
+
+def _shuffled_order_fn(seed: int) -> OrderFn:
+    """Deterministic permutation, guaranteed not to be the identity.
+
+    Stands in for a real `craft_fn` so the orchestration can be exercised
+    without an attacker. A shuffled stream is **not an attack** -- it is the
+    null ordering, and any effect it produces is drift. It exists so the
+    pipeline runs, not so a number gets quoted.
+
+    The identity check matters: `rng.permutation` returns the identity with
+    probability 1/n!, which at eight spans is 1/40320 -- rare enough to pass
+    review and frequent enough to appear once in a long sweep, as a single seed
+    silently contributing an exact zero.
+    """
+
+    def order_fn(spans):
+        spans = list(spans)
+        if len(spans) < 2:
+            return spans
+        rng = np.random.default_rng(_SHUFFLE_SEED_OFFSET + seed)
+        idx = rng.permutation(len(spans))
+        if np.array_equal(idx, np.arange(len(spans))):
+            idx = np.roll(idx, 1)
+        return [spans[i] for i in idx]
+
+    return order_fn
+
+
+def assert_arms_distinguishable(
+    poison: CraftedStream, control: CraftedStream, seed: int | None = None
+) -> None:
+    """Refuse a pair whose two arms are the same bytes.
+
+    `assert_streams_matched` checks the arms are *comparable* -- same length,
+    chunking, span size, dtype. It passes trivially when they are identical,
+    because identical streams match on every one of those fields. This is the
+    complementary check: comparable, and actually different.
+
+    Without it the poison/control comparison is vacuous by construction and
+    every downstream guard still reports green -- the same shape of failure
+    ADR-006 describes for the fast-weight carry, where a null arrives for a
+    reason that has nothing to do with the attack.
+    """
+    if np.array_equal(poison.tokens, control.tokens):
+        where = "" if seed is None else f" at seed {seed}"
+        raise ValueError(
+            f"poison and control streams are byte-identical{where}. That is not "
+            f"a weak attack, it is an absent one: the comparison would yield "
+            f"exactly zero corruption and every structural check would still "
+            f"pass. Supply a `craft_fn` that actually reorders, or check that "
+            f"the two arms are not being built from the same seed with the same "
+            f"ordering."
+        )
