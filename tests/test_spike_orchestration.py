@@ -212,8 +212,10 @@ def test_run_attack_spike_writes_no_report(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_run_stream_points_at_the_carry_overlay_not_at_checkpoints():
-    # It was logged as blocked on checkpoints; it is blocked on binding a step
-    # function, because the vendor discards its scan carry (ADR-006).
-    with pytest.raises(NotImplementedError, match="ADR-006"):
-        run_stream(None, None, make_condition())
+def test_run_stream_refuses_to_reconstruct_the_split_from_a_model_alone():
+    # Was blocked on checkpoints, then on binding a step function; now bound.
+    # What it will not do is guess: the block/state split in `vendor_bind.bind`
+    # cannot be recovered from the model without its `equinox.nn.State`, and a
+    # harness that silently proceeded here would be measuring an unsplit model.
+    with pytest.raises(ValueError, match="state.*or a prebuilt .binding"):
+        run_stream(object(), np.arange(LENGTH), make_condition())

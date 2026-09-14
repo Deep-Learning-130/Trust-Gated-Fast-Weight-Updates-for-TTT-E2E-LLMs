@@ -1,8 +1,12 @@
 """Phase 1 evaluation harness: run poison and control streams under matched conditions.
 
-Status: orchestration is specified; the model-touching steps raise until the
-checkpoints are fetched (`scripts/fetch_checkpoints.sh`) and the baseline
-reproduction in `experiments/000-repro-baseline/` has passed.
+Status: orchestration is specified and the model-touching steps are **bound**.
+`run_stream` and `eval_benign` drive the real `MetaModel.inner_loop_step`
+through `trustgate.eval.vendor_bind`, so they need an importable vendor tree
+and a GPU -- but **not** a checkpoint: `train.py:198` creates a fresh
+random-init model when `load_part=none`, which is what
+`experiments/003-smoke-125m/` exercises. A *verdict* still needs the released
+1B checkpoint and the Phase 0.5 baseline; execution no longer does.
 
 Matching discipline
 -------------------
@@ -30,6 +34,7 @@ from trustgate.attack.stream import (
     assert_stream_not_from_eval_split,
     assert_streams_matched,
 )
+from trustgate.eval import carry as carry_mod
 from trustgate.eval.carry import SATURATED_INNER_LR_MULTIPLIER
 from trustgate.eval.metrics import CorruptionResult, corruption_metric
 
@@ -249,29 +254,215 @@ class SpikeResult:
         )
 
 
-def run_stream(model, stream_tokens, condition: RunCondition):
+@dataclass(frozen=True)
+class BenignEvalResult:
+    """Benign loss plus the decay curve that the mean alone hides.
+
+    `001-attack-spike/README.md` resolves measurement mode as "adapt in meta,
+    **report the decay curve**": measurement stays in meta mode, so the inner
+    loop keeps stepping on the eval data and any poison effect decays across
+    eval chunks. A poison effect that has decayed to nothing by the end of the
+    window is a different finding from one that persists, and a single mean
+    cannot tell the two apart.
+    """
+
+    mean_loss: float
+    per_chunk_loss: tuple[float, ...]
+
+    @property
+    def first_chunk(self) -> float:
+        """Least-diluted measurement: one inner step of eval data at most."""
+        return self.per_chunk_loss[0]
+
+    @property
+    def decay(self) -> float:
+        """Last minus first. Near zero means the effect persisted across the
+        eval window; strongly positive means it washed out."""
+        return self.per_chunk_loss[-1] - self.per_chunk_loss[0]
+
+
+def run_stream(model, stream_tokens, condition: RunCondition, *, state=None, binding=None):
     """Feed one stream through TTT-E2E, returning the adapted fast weights.
 
     Runs with `train_mode="meta"` -- the only mode with an inner loop. In
     `"pretrain"` mode there are no fast weights to poison and the attack is
-    vacuously null.
+    vacuously null; `vendor_bind.bind` rejects it.
 
-    **Not blocked on checkpoints.** It is blocked on binding a step function to
-    the real `MetaModel.inner_loop_step`, because the vendor discards its scan
-    carry and never returns adapted fast weights at all (ADR-006). The threading
-    itself is implemented and tested in `trustgate.eval.carry`; use
-    `carry.run_sequences` and pass the result to `eval_benign`.
+    The threading is `trustgate.eval.carry`; the vendor inner step is bound by
+    `trustgate.eval.vendor_bind`. Neither the chunk loop nor the carry is
+    reimplemented here -- this function is the wiring between them, plus the
+    assertions that make the result admissible.
+
+    Returns the `CarryState`, not a loss. The carry is the artifact: it is what
+    the vendor discards at `transformer.py:712` and what `eval_benign` must be
+    handed for the measurement to mean anything (ADR-006).
+
+    Args:
+        model: a vendor `MetaModel`. Ignored when `binding` is supplied.
+        stream_tokens: flat Llama-3 token ids, `condition.stream_tokens` long.
+        state: the model's `equinox.nn.State`. Required unless `binding` is.
+        binding: a prebuilt `VendorBinding`, so a multi-seed run pays the block
+            split and prefix setup once rather than per stream.
     """
-    raise NotImplementedError(
-        "Bind step_fn to MetaModel.inner_loop_step and use "
-        "trustgate.eval.carry.run_sequences -- see ADR-006. The vendor cannot "
-        "return adapted fast weights on its own."
+    from trustgate.eval import vendor_bind
+
+    if binding is None:
+        if state is None:
+            raise ValueError(
+                "run_stream needs either `state` (the model's equinox.nn.State) "
+                "or a prebuilt `binding`; the block/state split in "
+                "vendor_bind.bind cannot be reconstructed from the model alone."
+            )
+        binding = vendor_bind.bind(model, state)
+
+    if binding.mini_batch_size != condition.mini_batch_size:
+        raise ValueError(
+            f"binding mini_batch_size {binding.mini_batch_size} != condition "
+            f"{condition.mini_batch_size}. The chunk granularity is what fast "
+            f"weights actually move at, and ADR-007 makes it travel with the "
+            f"verdict rather than be an implementation detail."
+        )
+
+    n_tokens = int(np.asarray(stream_tokens).shape[0])
+    if n_tokens != condition.stream_tokens:
+        raise ValueError(
+            f"stream is {n_tokens} tokens, condition declares "
+            f"{condition.stream_tokens}. Length is a matched field; an "
+            f"unmatched control makes a null look like a positive."
+        )
+
+    step_fn = vendor_bind.make_step_fn(binding)
+    carry = binding.init_carry()
+
+    # Asserted *before* anything runs. An unsaturated inner LR means a
+    # near-frozen inner loop and a null for a reason unrelated to the attack --
+    # cheaper to catch here than after a paid run.
+    carry_mod.assert_saturated_inner_lr(carry)
+
+    sequences = vendor_bind.split_stream(stream_tokens, condition.seq_length)
+
+    all_metrics: list[dict] = []
+    for tokens in sequences:
+        chunks = vendor_bind.sequence_chunks(
+            binding, tokens, bos_token_id=model_bos_token_id(binding)
+        )
+        carry, metrics = carry_mod.run_chunks(carry, chunks, step_fn)
+        all_metrics.extend(metrics)
+
+    if int(carry.n_steps) != condition.n_chunks:
+        raise ValueError(
+            f"ran {int(carry.n_steps)} inner steps, condition declares "
+            f"{condition.n_chunks}. `inner_opt_state` starts unwarmed, so the "
+            f"step count is only identical across arms if this matches."
+        )
+
+    return carry
+
+
+def model_bos_token_id(binding) -> int:
+    """BOS id from the bound model's config -- the loss mask depends on it.
+
+    `lm_dataset.py:53` builds `loss_masks` as `targets != bos_token_id`, so
+    reading this off the model rather than hardcoding 128000 keeps
+    `RunCondition.valid_tokens` honest if the vocabulary ever changes.
+    """
+    return int(binding.model_split.config.model.bos_token_id)
+
+
+def eval_benign_curve(
+    binding,
+    carry,
+    eval_tokens,
+    condition: RunCondition,
+) -> BenignEvalResult:
+    """Benign-task loss for a model carrying adapted fast weights.
+
+    Measurement stays in **meta** mode, per the resolved ambiguity in
+    `001-attack-spike/README.md`: freezing the fast weights would mean the
+    `pretrain` branch (`transformer.py:722-738`), which uses `self` rather than
+    the dtype-cast `model` and which the pre-registration can fairly be read as
+    forbidding. The cost is dilution across eval chunks, which is why the curve
+    is returned and not only its mean.
+
+    The carry is **not** mutated for the caller: eval adapts on eval data, and
+    letting that leak back into the stream's carry would make the second arm's
+    starting point depend on the first arm's measurement. Everything here is a
+    functional pytree update, so the caller's `carry` is untouched by
+    construction -- this note exists so nobody "optimises" that away.
+    """
+    from trustgate.eval import vendor_bind
+
+    carry_mod.assert_saturated_inner_lr(carry)
+
+    digest = eval_tokens_digest(np.asarray(eval_tokens)[:-1])
+    if digest != condition.eval_tokens_sha256:
+        raise ValueError(
+            "benign eval tokens do not match `condition.eval_tokens_sha256`. "
+            "The split *name* is not the data: two runs can evaluate different "
+            "windows of the same split under the same string, and the "
+            "poison/control comparison is only meaningful on identical "
+            "held-out tokens."
+        )
+
+    step_fn = vendor_bind.make_step_fn(binding)
+    chunks = vendor_bind.sequence_chunks(
+        binding, eval_tokens, bos_token_id=model_bos_token_id(binding)
+    )
+
+    _, metrics = carry_mod.run_chunks(carry, chunks, step_fn)
+
+    # `inner_loop_step` computes the loss at the *current* parameters and then
+    # updates (`transformer.py:617-627`), so each entry is a predict-then-adapt
+    # measurement -- which is the quantity the threat model names.
+    per_chunk = tuple(float(np.asarray(m[_loss_metric_key(m)]).mean()) for m in metrics)
+
+    return BenignEvalResult(
+        mean_loss=float(np.mean(per_chunk)),
+        per_chunk_loss=per_chunk,
     )
 
 
-def eval_benign(model, condition: RunCondition) -> float:
-    """Benign-task loss for a model with adapted fast weights."""
-    raise NotImplementedError("Blocked on checkpoints.")
+def _loss_metric_key(metrics: dict):
+    """Find the CE-loss key in a vendor metrics dict without importing the enum.
+
+    `MetaModel.MetricType` lives in the vendor tree, which is not importable in
+    the CPU test environment. Matching on the member name keeps this module's
+    import discipline intact (see `vendor_bind`) and works against test fakes.
+    """
+    for key in metrics:
+        name = getattr(key, "name", None) or str(key)
+        if name == "loss":
+            return key
+    raise KeyError(
+        f"no 'loss' metric in inner-step metrics; got {list(metrics)}. "
+        "`inner_loop_step` populates MetricType.loss at transformer.py:617."
+    )
+
+
+def eval_benign(binding, carry, eval_tokens, condition: RunCondition) -> float:
+    """Mean benign loss. See `eval_benign_curve` for the decay curve."""
+    return eval_benign_curve(binding, carry, eval_tokens, condition).mean_loss
+
+
+def make_adapt_and_eval(
+    binding,
+    eval_tokens,
+    *,
+    model=None,
+) -> Callable[[CraftedStream, RunCondition], float]:
+    """Build the `adapt_and_eval` callable `run_attack_spike` injects.
+
+    This is the composition the whole module exists to make possible: adapt on
+    the stream, keep the carry, measure the benign task with it. Both halves in
+    one call is the *only* correct shape -- a two-call harness resets the fast
+    weights between them and measures eval noise (ADR-006).
+    """
+
+    def adapt_and_eval(stream: CraftedStream, condition: RunCondition) -> float:
+        carry = run_stream(model, stream.tokens, condition, binding=binding)
+        return eval_benign(binding, carry, eval_tokens, condition)
+
+    return adapt_and_eval
 
 
 def run_attack_spike(
