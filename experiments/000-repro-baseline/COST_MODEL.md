@@ -63,9 +63,9 @@ on that iterator in eval mode, so nothing is read; and if grain's `prefetch_buff
 does read eagerly, it reads zeros for free rather than crashing.
 
 ```
-gsutil -u $P cp      gs://llama3-books3/zarr.json        $LOCAL/
-gsutil -u $P cp      gs://llama3-books3/train/zarr.json  $LOCAL/train/
-gsutil -u $P -m cp -r gs://llama3-books3/val             $LOCAL/
+gsutil -u $P cp      gs://llama3-books3/data.zarr/zarr.json        $LOCAL/
+gsutil -u $P cp      gs://llama3-books3/data.zarr/train/zarr.json  $LOCAL/train/
+gsutil -u $P -m cp -r gs://llama3-books3/data.zarr/val             $LOCAL/
 ```
 
 This supersedes ADR-004's framing of the grain prefetch as an egress risk. It is not a
@@ -99,6 +99,24 @@ because that is a much larger transfer.
 > **This is the probe earning its keep.** Every one of these failures would otherwise have
 > happened on a rented box, after billing started, which is the exact scenario this section
 > was written to prevent.
+>
+> **Resolved the same day, by listing.** The store is nested one level down:
+>
+> ```
+> gs://llama3-books3/data.zarr/zarr.json      <- group metadata
+> gs://llama3-books3/data.zarr/train/
+> gs://llama3-books3/data.zarr/val/
+> ```
+>
+> The array names were right all along; only the root was wrong. **`data.zarr/` is the zarr
+> store root**, so it is what `LocalStore(path)` must be pointed at — which makes it the
+> value of `deploy_paths.data.books3`, *not* the directory the vendor README's `cp -r`
+> creates. Getting that one level wrong produces a `LocalStore` that opens and then fails to
+> find `/val`, on the box, after billing starts.
+>
+> The recipe above and `scripts/bootstrap_gpu_box.sh` are corrected. The full `cp -r`
+> fallback is **not** needed: the selective copy works, it just needed the right prefix.
+> Still outstanding: the `/val` byte count itself (§2.2), now a single `du -s` away.
 
 ---
 
@@ -346,6 +364,7 @@ moment.
 | 2026-09-14 | §1 requester-pays verified anonymously at zero cost, all three buckets. | Settled a standing assumption without auth or spend. |
 | 2026-09-14 | Added §9 (access routes). No cap, bar or estimate above it changed. | The first GCP billing signup was denied; the routes needed recording where the next person looks. |
 | 2026-09-14 | §2.1 checkpoint sizes **measured** (1B = 5.35 GB, −9.4% vs estimate; 125M = 0.68 GB). §1.1's store layout **falsified**. | First probe with a real billing account, supplied by P3. |
+| 2026-09-14 | Store root corrected to `gs://llama3-books3/data.zarr` in §1.1, `EVAL_ENTRYPOINT.md`, `bootstrap_gpu_box.sh` and `probe_gcs_access.sh`. | Bucket listing. The selective-copy recipe stands; only the prefix was wrong. |
 
 ---
 

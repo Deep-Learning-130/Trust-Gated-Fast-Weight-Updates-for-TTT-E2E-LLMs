@@ -34,7 +34,7 @@ uv run --exact train \
   training.exp_name=eval-1b-books-8k \
   training.load_part=params \
   checkpoint.resume_checkpoint_dir=/abs/path/to/1b_ttt_e2e_finetune_books_8k_1x_cc \
-  deploy_paths.data.books3=/abs/path/to/llama3-books3 \
+  deploy_paths.data.books3=/abs/path/to/llama3-books3/data.zarr \
   training.exp_dir=/abs/path/outside/repo/runs \
   training.wandb_entity=<entity> \
   training.wandb_project=<project> \
@@ -191,7 +191,7 @@ if not checkpoint_path.startswith("gs://"):
 **Only the `val` sub-array is read for eval.**
 [ttt/dataloader/lm_dataset.py:16](../../vendor/ttt-e2e/ttt/dataloader/lm_dataset.py#L16) opens
 `zarr.open_array(store, path=f"/{split}")`, so `train` and `val` are sibling arrays inside one
-store. `gsutil -u "$GCP_BILLING_PROJECT" du -s gs://llama3-books3/val` gives the eval-only byte
+store. `gsutil -u "$GCP_BILLING_PROJECT" du -s gs://llama3-books3/data.zarr/val` gives the eval-only byte
 count, which should be far smaller than the whole bucket. **D4 should price `/val`, not the
 full corpus** — provided a selective fetch is used rather than the README's `cp -r`.
 

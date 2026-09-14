@@ -31,7 +31,10 @@ set -euo pipefail
 
 CKPT="${CKPT:-1b_ttt_e2e_finetune_books_8k_1x_cc}"
 BUCKET="${BUCKET:-gs://ttt-e2e-checkpoints}"
-DATA_BUCKET="${DATA_BUCKET:-gs://llama3-books3}"
+# The zarr store root is data.zarr/ INSIDE the bucket, not the bucket root --
+# listed 2026-09-14. LocalStore() is pointed at this, so every path below and
+# deploy_paths.data.books3 must resolve to the directory holding zarr.json.
+DATA_BUCKET="${DATA_BUCKET:-gs://llama3-books3/data.zarr}"
 PINNED_SHA="a4fc4788ace38e29b5067916d4f4be33da894085"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -41,7 +44,7 @@ cd "$repo_root"
 # ./experiments, which from the repo root writes into our own tracked tree.
 DATA_ROOT="${DATA_ROOT:-$HOME/ttt-data}"
 EXP_DIR="${EXP_DIR:-$HOME/ttt-runs}"
-BOOKS3_LOCAL="$DATA_ROOT/llama3-books3"
+BOOKS3_LOCAL="$DATA_ROOT/llama3-books3/data.zarr"   # mirrors the remote store root
 CKPT_DEST="$repo_root/checkpoints/$CKPT"     # checkpoints/ is git-ignored
 
 say()  { printf '\n==> %s\n' "$*"; }

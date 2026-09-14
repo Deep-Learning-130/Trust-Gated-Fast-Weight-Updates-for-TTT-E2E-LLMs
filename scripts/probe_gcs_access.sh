@@ -25,7 +25,10 @@ set -uo pipefail
 CKPT_BUCKET="gs://ttt-e2e-checkpoints"
 CKPT_1B="1b_ttt_e2e_finetune_books_8k_1x_cc"     # ADR-004/005: the baseline target
 CKPT_125M="125m_ttt_e2e_finetune_books_8k_1x_cc" # the cheap rehearsal alternative
-DATA_BUCKET="gs://llama3-books3"
+# Verified by listing 2026-09-14: the zarr store is nested at data.zarr/ inside
+# the bucket. Probing the bucket root returns nothing, which is what the first
+# run of this script found.
+DATA_BUCKET="gs://llama3-books3/data.zarr"
 
 # COST_MODEL.md 2.2: int32 token ids, Blosc/zstd, assume ~2.5x => ~1.6 B stored
 # per token. The plausible band written down in August, before any measurement.
