@@ -157,6 +157,15 @@ depends: —
 > remaining three — `gcloud auth login`, the `PROBE_ONLY=1` run, and the `/val` byte count —
 > all need a GCP billing project. Egress is priced under $2, so this is a **billing account,
 > not a budget**.
+>
+> **Update, later the same day.** A GCP free-trial signup was **denied** at the payment
+> step — the automatic-payments profile, which registers a recurring e-mandate. Per Google's
+> own docs Indian debit cards cannot be used for automatic payments at all, and some Indian
+> credit cards also fail. A one-off charge is a different mechanism, so this says nothing
+> about the card. Routes not yet tried, cheapest first: the manual-payments profile at
+> signup; P2's or P3's billing account (the checkpoint can be read straight from `gs://` per
+> `ttt/infra/checkpoint.py:83-84`, so the holder can stream it on the run box and nobody
+> copies weights); an institutional account. Recorded in `COST_MODEL.md` §9.
 
 - `gcloud auth login`; export `GCP_BILLING_PROJECT`. Both buckets are requester-pays.
 - `PROBE_ONLY=1 bash scripts/fetch_checkpoints.sh` — the first execution of the script and
@@ -172,7 +181,12 @@ depends: T1.3
 > **Status (2026-09-14):** `NOT STARTED` — no booking row claimed, no box provisioned.
 > A $0 rehearsal of the same path is written in `experiments/003-smoke-125m/` (125M,
 > random-init, `dummy_dataset`, Colab or Kaggle) and is unmerged and unrun. Running it first
-> converts most of this task's first-launch failures into free ones.
+> converts most of this task's first-launch failures into free ones. **Prefer Kaggle TPU
+> v3-8 over a Colab T4**: this vendor tree is JAX, the v3-8 is JAX-native with 128 GB HBM and
+> native bf16, and it needs no checkpoint — so it is unaffected by the T1.3 blocker.
+> Before booking an 80 GB card, read `COST_MODEL.md` §9.4: the 80 GB figure is the vendor's
+> *training* footprint, and at this project's batch sizes a 40 GB card may suffice at roughly
+> half the rate. That is an estimate and has never run — measure it before relying on it.
 
 - Claim booking row #1 in `docs/protocols/gpu-bookings.md` **before** the instance starts:
   owner, task ID, hour estimate, budget.
@@ -187,6 +201,10 @@ depends: T1.3
 `Priority P0` · depends: T1.4
 
 > **Status (2026-09-14):** `BLOCKED` on a GCP billing project (via T1.3), not on money.
+> **There is no mirror** — checked, so nobody re-checks: the vendor README lists all six
+> checkpoints as `gs://` requester-pays, and HuggingFace's `Test-Time-Training` org publishes
+> TTT-Linear/TTT-MLP from the **earlier** paper — a different architecture with no
+> `feed_forward_prime` and no meta branch, so not a substitute. `COST_MODEL.md` §9.2.
 
 - Full `fetch_checkpoints.sh` run with `MAX_BYTES` set from the T1.3 probe.
 - sha256 manifest + byte size written to `experiments/000-repro-baseline/results/`.
