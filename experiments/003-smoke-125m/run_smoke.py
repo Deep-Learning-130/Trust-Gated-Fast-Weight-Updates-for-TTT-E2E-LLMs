@@ -161,6 +161,31 @@ def build_config(args):
 
     # train.py:123 -- the model reads its length from here, not from training.
     cfg.model.seq_len = cfg.training.seq_length
+
+    # Observed 2026-09-15: --seq-length 4096 against this config's
+    # sliding_window_size of 8192 returned a loss curve of [nan, nan, nan, nan].
+    # 8192 returned finite values on the same box and the same revision.
+    #
+    # full_sw_attention passes local_window_size=(window_size - 1, 0) to a cuDNN
+    # kernel (attention.py:312). Below the window length the sequence is shorter
+    # than the window the kernel is told to use, and it returns NaN rather than
+    # an error.
+    #
+    # Refusing rather than warning. Shortening the sequence is the obvious way
+    # to fit a smaller card, it LOOKS like a pure memory reduction, and it
+    # silently destroys the numerics -- the worst combination available. A run
+    # that produces NaN and reports it is lucky; one that produces a plausible
+    # number from a partly-masked window would not announce itself at all.
+    window = cfg.model.sliding_window_size
+    if cfg.training.seq_length < window:
+        raise SystemExit(
+            f"refusing to run: --seq-length {cfg.training.seq_length} is below "
+            f"this config's sliding_window_size of {window}.\n"
+            f"Observed to return NaN, not an error. Use --seq-length {window} "
+            f"or larger.\n"
+            f"If you need less memory, --param-dtype bf16 halves the parameter "
+            f"footprint without touching the attention geometry."
+        )
     return cfg
 
 
