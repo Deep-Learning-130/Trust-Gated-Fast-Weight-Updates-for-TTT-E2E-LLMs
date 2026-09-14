@@ -55,7 +55,7 @@ Write-Host @"
  This remote has NO recorded disclosure decision.
 
  Pushing here publishes this work to a surface nobody has
- decided about. `origin` being public does not decide it --
+ decided about. 'origin' being public does not decide it --
  that was one decision about one remote.
 
  Before proceeding:
@@ -65,13 +65,31 @@ Write-Host @"
       runs from the 2026-08-01 disclosure, not from this push.
    3. Any credentials in the diff -- W&B keys, GCP project ids, .env?
 
- If it is intended, record it: add the URL to `$DECIDED` in
- scripts/pre-push-guard.sh (and .ps1) and note it in DISCLOSURE.md.
- Then this prompt stops firing, for everyone, for a stated reason.
+ If it is intended, record it: add the URL to the DECIDED list
+ in scripts/pre-push-guard.sh AND scripts/pre-push-guard.ps1 --
+ both, or the two guards disagree and the CI hygiene job fails.
+ Note it in DISCLOSURE.md. Then this prompt stops firing, for
+ everyone, for a stated reason.
 ==============================================================
 "@
 
-$ans = Read-Host " Type 'new remote' to proceed anyway"
+# The .sh guard refuses outright when there is no terminal, rather than
+# printing a prompt nothing will answer. Match that explicitly. Relying on
+# `Read-Host` to throw, or to return empty and fail the comparison, is
+# fail-closed *by accident* -- and an accident is one PowerShell version away
+# from being fail-open on the one code path where that must never happen.
+if (-not [Environment]::UserInteractive) {
+    Write-Host " Non-interactive shell; refusing. Push from a terminal if this is intended."
+    exit 1
+}
+
+try {
+    $ans = Read-Host " Type 'new remote' to proceed anyway"
+} catch {
+    Write-Host " Could not read a reply ($($_.Exception.Message)); refusing."
+    exit 1
+}
+
 if ($ans -eq "new remote") {
     Write-Host " Proceeding. Record this remote in DISCLOSURE.md."
     exit 0
