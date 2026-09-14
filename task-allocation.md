@@ -166,6 +166,11 @@ depends: —
 > signup; P2's or P3's billing account (the checkpoint can be read straight from `gs://` per
 > `ttt/infra/checkpoint.py:83-84`, so the holder can stream it on the run box and nobody
 > copies weights); an institutional account. Recorded in `COST_MODEL.md` §9.
+>
+> **P3 has agreed to supply the billing account.** `scripts/probe_gcs_access.sh` answers all
+> four sub-items in one command and is deliberately standalone — no repo, no SDK install, no
+> `gcloud auth login` — so it can be pasted into Google Cloud Shell by whoever holds the
+> account. It is metadata-only and contains no `cp`.
 
 - `gcloud auth login`; export `GCP_BILLING_PROJECT`. Both buckets are requester-pays.
 - `PROBE_ONLY=1 bash scripts/fetch_checkpoints.sh` — the first execution of the script and
