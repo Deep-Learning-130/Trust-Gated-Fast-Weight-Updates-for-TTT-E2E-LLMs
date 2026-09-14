@@ -1,0 +1,469 @@
+%% SUPERSEDED by p3-intro-related-methodology.tex (the P3 deliverable), which
+%% carries these sections forward in reconciled form and adds Section III.
+%% Kept as the P2 snapshot; do not edit further.
+%% Trust-Gated Fast-Weight Updates for TTT-E2E LLMs
+%% Introduction, Related Work, and References
+%% Self-contained: compiles with a stock IEEEtran installation (e.g. Overleaf),
+%% no external .bib file required.
+
+\documentclass[journal]{IEEEtran}
+
+\usepackage{cite}
+\usepackage{amsmath}
+\usepackage{array}
+
+\begin{document}
+
+\title{Trust-Gated Fast-Weight Updates for TTT-E2E Large Language Models}
+
+\author{Manas~Maahir~R.,~Jay~Krishna~Kamlekar,~and~Kartheek~Yadav% <-this % stops a space
+\thanks{The authors are with the School of Computer Science and Engineering,
+Vellore Institute of Technology, Vellore, India.}}
+
+\maketitle
+
+\section{Introduction}
+
+\IEEEPARstart{L}{arge} language models are increasingly deployed on inputs far
+longer than the contexts they were trained to attend over, and the quadratic cost
+of full attention makes naive scaling impractical. A recent line of work responds
+by treating long-context modeling not as an architecture problem but as a learning
+problem: rather than attending over a context, the model learns it. End-to-end
+test-time training (TTT-E2E) instantiates this idea directly~\cite{tandon2025tttE2E}.
+The model carries a set of \emph{fast weights} that it updates by next-token
+prediction as it reads, compressing the context into parameters at near-recurrent
+cost while matching the scaling behavior of full attention. Adaptation at inference
+is no longer a preprocessing step or an auxiliary objective; it is the mechanism by
+which the model represents what it has read. The same principle now appears across
+deployed systems that personalize, accumulate session state, or maintain persistent
+memory, and its practical appeal is clear: capability that would otherwise demand a
+longer context window or a larger model is obtained instead by letting the model
+keep learning while it serves.
+
+That capability carries a security cost which has not been accounted for. Once fast
+weights are updated during inference, the serving path becomes a \emph{write path}
+into model state, and a system that learns while it serves can be poisoned while it
+serves. The concern is not hypothetical. Test-time adaptation has been shown to be
+poisonable under white-box assumptions~\cite{cong2024ttp}, under realistic
+constraints on what an attacker can actually submit~\cite{su2025realistic}, and in
+the black-box continual setting~\cite{hoang2024rip}. What makes the fast-weight case
+difficult is the absence of nearly every signal on which conventional defenses rely.
+Updates are self-supervised, so there is no label against which to check them. They
+arrive from a single stream, so there is no cohort of peer updates whose agreement
+could expose an outlier. Each individual update is small and, taken alone, entirely
+plausible; the damage is cumulative, distributed across a sequence of steps that a
+per-update test would pass one at a time. And because the appeal of the approach is
+its near-recurrent cost, a defense that inspects every update must be cheap enough
+not to erase the advantage it is protecting.
+
+Existing defenses were built for settings that differ from this one structurally,
+not merely superficially. Training-time methods harden a model before deployment,
+whether by adversarial self-training with consistency regularization across weakly
+augmented and adversarial views~\cite{li2024ast}, by routing training points
+according to estimated poisoning risk~\cite{bena2025risk}, or by distilling a clean
+student from a suspect encoder~\cite{han2025mimic}; all act on slow weights that are
+frozen once serving begins. Defenses for distributed learning do inspect updates
+before they commit, using robust aggregation over client
+gradients~\cite{yang2025scalesign,zukaib2026d3flids}, an audit against a clean
+reference dataset~\cite{basak2025dpad,nawshin2026concurrent}, or a learned selection
+policy~\cite{xu2026feddrlpd} --- but each depends on a population of concurrent
+updates whose mutual agreement carries the signal. Robust test-time adaptation
+offers the closest analogue, replacing the mean in batch-normalization statistics
+with the median so that no single malicious sample can swing
+them~\cite{park2024medbn}. Finally, work on contextual backdoors establishes that
+adaptation-time input is already an exploitable surface~\cite{liu2025contextual},
+though it changes no parameters at all.
+
+The resulting gap is specific rather than general. No published mechanism governs
+\emph{parametric} updates committed at inference time in a language model. The
+closest defense, MedBN~\cite{park2024medbn}, operates on batch-normalization
+statistics, and the TTT-E2E architecture contains no batch-normalization layers for
+such a test to act upon. Robust aggregation presupposes the redundancy of many
+concurrent clients, which a single context stream does not provide. Audit-based
+gates presuppose both a clean reference corpus and a discrete round boundary at
+which to run the audit, and neither exists when updates commit token by token. The
+threat itself has been established in image-model test-time
+adaptation~\cite{cong2024ttp,su2025realistic,hoang2024rip} and has not been carried
+across to fast-weight language models, where the unit under attack is neither a
+normalization statistic nor an aggregated gradient but the weight delta itself.
+Just as consequentially, no existing method bounds how far accumulated updates may
+carry a model from its trusted state, and none provides a route back once they have.
+
+This paper addresses that gap. We propose a \emph{trust gate} for fast-weight
+updates: a mechanism that intercepts every proposed update at the point where it
+would commit, admits it only if it remains consistent with a frozen anchor model,
+holds the accumulated effect of admitted updates within an explicit drift budget
+$\varepsilon$, and restores the last trusted checkpoint when that budget is
+breached. The objective is a defended inference path whose divergence from trusted
+behavior is bounded by construction rather than observed after the fact.
+
+The main contributions of this paper are:
+
+\begin{itemize}
+\item We formalize benign-stream fast-weight poisoning as a threat model for
+TTT-E2E language models, and construct a crafted-stream adversary that steers fast
+weights using inputs which remain individually unremarkable, giving the defense a
+concrete attacker to be evaluated against.
+
+\item We design a trust gate that intercepts each proposed fast-weight update at
+its single commit point and scores it on two signals: behavioral consistency with a
+frozen meta-learned anchor over a rotating held-out probe set, and the uncertainty
+of the proposed update itself.
+
+\item We introduce a latching cumulative-drift accumulator that converts per-update
+decisions into a system-level property, and we establish a bounded per-window drift
+guarantee: over any window, the sequence of admitted updates cannot displace the
+fast weights beyond the configured budget.
+
+\item We show that the enforcement primitives are $O(1)$ in the streaming setting.
+Because fast-weight updates are pure functions over a parameter tree, rejection
+reduces to an elementwise select between weight trees and rollback to a reference
+swap into a ring buffer of checkpoints, with no mutable state to unwind.
+
+\item We specify an evaluation protocol in which corruption thresholds are fixed
+before any measurement is taken, comparing the gate against a robust-aggregation
+baseline constructed as the closest available analogue of MedBN for this setting,
+and recording every decision in an accept/reject/rollback audit trail.
+\end{itemize}
+
+The significance of this work is both theoretical and practical. Theoretically, it
+supplies a drift guarantee for inference-time parametric adaptation, a setting in
+which robustness has so far been argued empirically rather than bounded.
+Practically, the gate is an \emph{overlay}: it wraps the update function rather than
+modifying the model, so it requires neither retraining nor any change to published
+weights, and can be applied to an existing deployment. More broadly, any system that
+writes to its own parameters while serving --- a personalized assistant, an agent
+with persistent memory, a continually adapting recommender --- inherits the same
+write-path exposure, and the decomposition into interceptor, drift budget, and
+rollback is not specific to TTT-E2E.
+
+The remainder of this paper is organized as follows. Section~II reviews existing
+work on poisoning and defense across training-time, distributed, structural,
+context-level, and test-time adaptation settings, and identifies the gap this work
+addresses. Section~III presents the threat model and the trust-gate architecture.
+Section~IV describes the experimental setup and the pre-registered evaluation
+criteria. Section~V reports results, and Section~VI concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Thematic Organization of Existing Work}
+
+Research relevant to the poisoning of adaptive models divides into five families,
+distinguished less by application domain than by \emph{where in a model's lifecycle
+an adversary writes} and \emph{what unit a defense inspects}. These are: (i)
+poisoning of training data and offline hardening against it; (ii) update-level
+defense in distributed learning, where a server screens proposed parameter changes
+before aggregating them; (iii) structural and feature poisoning in relational
+models, where individually plausible perturbations accumulate; (iv) inference-time
+context poisoning, which alters model behavior without touching parameters; and (v)
+attacks on, and defenses for, test-time adaptation --- the family closest to the
+setting considered here. Read in order, these families trace a steady migration of
+the attack surface, from the training corpus to the update channel to the input
+stream at inference. The defenses have not migrated at the same rate.
+
+\subsection{Key Representative Studies}
+
+In the training-time family, Bena \emph{et al.} score each training point with three
+geometric indicators of poisoning and route high-risk points across an ensemble
+rather than deleting them, avoiding the false-positive cost of
+filtering~\cite{bena2025risk}. Han \emph{et al.} address the supply-chain case,
+distilling a randomly initialized student from a suspect self-supervised encoder and
+using per-layer mutual information to decide which layers carry clean signal worth
+copying~\cite{han2025mimic}. Li \emph{et al.} act on the model rather than the data,
+using confident pseudo-labels from weakly augmented views as targets for adversarial
+views so that representations remain consistent under perturbation~\cite{li2024ast}.
+
+The distributed family is the largest and the most directly concerned with screening
+updates. Yang \emph{et al.} contribute both sides of the exchange: ScaleSign builds
+a malicious gradient by per-coordinate scaling that preserves norm, direction, and
+sign statistics simultaneously, and MSGuard answers it by clustering clients over
+five features rather than one~\cite{yang2025scalesign}. Zukaib \emph{et al.}
+dispense with the auxiliary dataset entirely, normalizing gradient magnitudes across
+layers and projecting misaligned directions onto a consensus subspace before an
+isolation forest screens what remains~\cite{zukaib2026d3flids}. A second group gates
+on behavior rather than geometry: Basak and Chatterjee evaluate each update against
+a public audit set and discard those exceeding a divergence
+tolerance~\cite{basak2025dpad}, while Nawshin \emph{et al.} clamp update norms and
+then require that a client's deviation in behavioral space agree with its deviation
+in parameter space~\cite{nawshin2026concurrent}. Xu \emph{et al.} replace fixed
+thresholds with a learned policy, training an agent to select trustworthy clients
+from observed system state~\cite{xu2026feddrlpd}. Liu \emph{et al.} push detection
+into the encrypted domain, amplifying benign--malicious separation under homomorphic
+encryption~\cite{liu2025antidotefl}. Huang \emph{et al.} sidestep identification
+altogether, estimating the \emph{fraction} of contaminated reports from cross-round
+consistency and subtracting its contribution from the
+aggregate~\cite{huang2024ldpguard}.
+
+Within relational models, Shi \emph{et al.} inject statistically plausible nodes
+into hypergraphs under an explicit cost budget, searching hyperedge combinations
+with a genetic algorithm~\cite{shi2025h3ni}, while Chen \emph{et al.} accumulate
+feature gradients with momentum so that a sequence of individually budgeted
+modifications compounds into large degradation~\cite{chen2025mghga}. On the defense
+side, Zhang and Bao enforce consistency between a purified local view and a
+diffusion-based global view of the same graph~\cite{zhang2025cola}.
+
+The context-poisoning family is represented by Liu \emph{et al.}, who show that
+poisoning a handful of in-context demonstrations induces a closed-box language model
+to emit code containing a latent defect, activated only when a textual trigger
+appears in the prompt and a matching visual trigger appears in the agent's
+environment~\cite{liu2025contextual}. No weights change at any point.
+
+Finally, in test-time adaptation, Cong \emph{et al.} established that adaptation is
+poisonable~\cite{cong2024ttp}, Su \emph{et al.} constrained the attacker to
+perturbations that could realistically be submitted~\cite{su2025realistic}, and
+Hoang \emph{et al.} extended the attack to the black-box continual
+setting~\cite{hoang2024rip}. Against these, Park \emph{et al.} proposed MedBN,
+substituting the median for the mean in batch-normalization statistics so that a
+single malicious sample in a test batch cannot swing them~\cite{park2024medbn}.
+Wang \emph{et al.}, though targeting oriented object detection rather than
+adaptation, contribute a result that bears on defense design: their attack ablation
+shows individually modest search enhancements composing into a substantially
+stronger attack~\cite{wang2026insulator}.
+
+\subsection{Strengths and Limitations}
+
+Six conclusions follow from this body of work, each bearing directly on the design
+of a defense for fast weights.
+
+First, a defense that inspects one signal is defeated by an attacker who matches
+that signal. ScaleSign is the cleanest demonstration: by preserving magnitude,
+direction, and sign statistics at once, it is accepted in the overwhelming majority
+of rounds by a defense that examines exactly those
+quantities~\cite{yang2025scalesign}. The field's response has been to add features
+--- a spectral score, a projection step, a clustering stage~\cite{yang2025scalesign,
+zukaib2026d3flids} --- which raises the attacker's cost without closing the loop.
+These multi-feature defenses are moreover typically evaluated against attacks that
+either predate them or originate with the same authors, so the question of how many
+independent signals are needed before evasion becomes genuinely expensive remains
+open.
+
+Second, behavioral gating works, but imports an assumption that often goes
+unexamined. Both the audit-based~\cite{basak2025dpad} and
+cross-space~\cite{nawshin2026concurrent} defenses require the defender to hold a
+clean reference set representative of honest behavior. Where legitimate data is
+genuinely heterogeneous, such a set may reject valid updates as readily as malicious
+ones; where data is private, it may not be obtainable at all. The design principle
+survives the criticism --- comparing a proposed update against trusted reference
+behavior is the right instinct, and it recurs in the consistency objectives
+of~\cite{li2024ast} and~\cite{zhang2025cola} --- but the reference must be something
+the defender actually possesses.
+
+Third, per-sample detection has a hard limit. Huang \emph{et al.} make it concrete:
+when a poisoned contribution passes through the same generative pipeline as a clean
+one, no per-report test can separate them, and every prior countermeasure in their
+setting is simply inapplicable~\cite{huang2024ldpguard}. Their answer --- estimate
+contamination at the population level and correct the aggregate rather than
+identifying culprits --- is a template worth naming, although it assumes a static
+adversary and knowledge of the target set. The lesson generalizes beyond its
+setting: where individual contributions are indistinguishable by construction, a
+defense must reason about aggregate effect rather than individual identity.
+
+Fourth, accumulated small perturbations are the operative threat. Momentum-guided
+feature poisoning~\cite{chen2025mghga} and budget-aware node
+injection~\cite{shi2025h3ni} both establish that a sequence of individually
+plausible, individually budgeted changes compounds into large behavioral change, and
+the attack ablation of~\cite{wang2026insulator} makes the same point from the
+opposite direction. A defense that evaluates each update in isolation, and passes
+each one, is not thereby safe: the quantity requiring constraint is cumulative
+displacement, not per-step magnitude.
+
+Fifth, defenses transfer across settings far less readily than their framing
+suggests. Han \emph{et al.} quantify this directly, showing that defenses designed
+for supervised classifiers and ported to self-supervised encoders leave a wide band
+of residual attack success~\cite{han2025mimic}. The field was not merely
+under-explored in the new setting; it was actively mis-served by transplanted
+methods. This is a standing caution against assuming that a robust test-time
+adaptation defense can simply be repointed at a new architecture.
+
+Sixth, the defenses closest in spirit are all offline. Consistency regularization
+against a trusted view~\cite{li2024ast}, multi-view
+agreement~\cite{zhang2025cola}, and reconstruction-based
+denoising~\cite{wang2026insulator} each reduce adversarial harm, but each operates
+on slow weights during training or on inputs prior to inference. None intercepts a
+parameter update as it commits, none bounds cumulative displacement from a trusted
+state, and none provides a recovery path once displacement has occurred.
+
+\subsection{The Research Gap}
+
+Taken together, these limitations describe a gap that is structural rather than
+incremental: \emph{no existing defense governs parametric updates committed at
+inference time in a language model, and none bounds the cumulative drift such
+updates induce.} The distinction from MedBN~\cite{park2024medbn} deserves precise
+statement, since it is the nearest published defense and the one a reader is most
+likely to raise. Table~\ref{tab:gap} sets out the five axes on which the settings
+diverge.
+
+\begin{table}[!t]
+\renewcommand{\arraystretch}{1.3}
+\caption{Robust Test-Time Adaptation Versus the Proposed Trust Gate}
+\label{tab:gap}
+\centering
+\footnotesize
+\begin{tabular}{|p{0.20\columnwidth}|p{0.32\columnwidth}|p{0.32\columnwidth}|}
+\hline
+\textbf{Axis} & \textbf{Robust TTA (MedBN)} & \textbf{Proposed trust gate} \\
+\hline
+Domain & Test-time adaptation for image classification & Long-context language
+modeling with fast weights \\
+\hline
+Unit defended & Batch-normalization statistics & The fast-weight update
+$\Delta\theta$ itself \\
+\hline
+Signal type & Distributional: a robust statistic over a test batch & Behavioral:
+output divergence from a frozen anchor \\
+\hline
+Guarantee & Robust statistic within one batch & Bounded cumulative drift per window
+\\
+\hline
+Recovery & None & Ring-buffered checkpoints with $O(1)$ rollback \\
+\hline
+\end{tabular}
+\end{table}
+
+The differences are not cosmetic. MedBN robustifies batch-normalization statistics,
+and the TTT-E2E architecture contains no batch-normalization layers at all, so there
+is no statistic on which a median-substitution test could operate. A robust statistic
+bounds the influence of one sample within one batch; it says nothing about
+displacement accumulated across a stream, which is precisely the regime the
+cumulative-perturbation attacks~\cite{shi2025h3ni,chen2025mghga} identify as
+dangerous. And MedBN, like the robust-aggregation family generally, has no notion of
+checkpointing or rollback: a defense that admits an update it should have rejected
+has no route back.
+
+The consequences of leaving this gap open scale with adoption. The property that
+makes adaptation at inference attractive --- that the model absorbs its input into
+its parameters --- is exactly the property that makes the input stream a write
+channel. As long as no mechanism governs that channel, every deployment of a
+fast-weight model accepts unbounded, unlogged, and irreversible modification of its
+own state by whoever supplies its context.
+
+\subsection{Positioning of This Work}
+
+Motivated by these limitations, this paper proposes a trust gate for fast-weight
+updates in TTT-E2E language models. From the behavioral-gating
+line~\cite{basak2025dpad,nawshin2026concurrent} we take the principle that an update
+should be validated against trusted reference behavior before it commits, and we
+resolve the clean-reference-set assumption by anchoring against a frozen copy of the
+model itself, evaluated on rotating held-out probes, rather than against a corpus the
+defender must independently obtain. From the cumulative-perturbation
+attacks~\cite{shi2025h3ni,chen2025mghga,wang2026insulator} we take the requirement
+that the constrained quantity be aggregate displacement, and we make it explicit as a
+latching drift budget rather than leaving it as an emergent property. From the
+aggregate-correction template of~\cite{huang2024ldpguard} we take the insight that
+where individual contributions cannot be separated, a defense must reason about
+accumulated effect. And from the transfer failures documented
+in~\cite{han2025mimic} we take the discipline of not assuming that an existing
+defense can be repointed at a new architecture: the gate is designed with the
+fast-weight update as its unit, rather than adapted from a statistic that does not
+exist in this setting. What no prior work supplies, and what this paper contributes,
+is the combination of an interception point at the update commit, a bounded
+cumulative-drift budget, and constant-time rollback to the last trusted checkpoint.
+
+\begin{thebibliography}{20}
+
+\bibitem{tandon2025tttE2E}
+A. Tandon, K. Dalal, X. Li, D. Koceja, M. R\o{}d, S. Buchanan, X. Wang,
+J. Leskovec, S. Koyejo, T. Hashimoto, C. Guestrin, J. McCaleb, Y. Choi, and Y. Sun,
+``End-to-end test-time training for long context,'' \emph{arXiv:2512.23675}, 2025.
+
+\bibitem{cong2024ttp}
+T. Cong, X. He, Y. Shen, and Y. Zhang, ``Test-time poisoning attacks against
+test-time adaptation models,'' in \emph{Proc. 45th IEEE Symp. Security and Privacy
+(S\&P)}, 2024. % TODO: add page range from the published proceedings
+
+\bibitem{su2025realistic}
+Y. Su, Y. Li, N. Liu, K. Jia, X. Yang, C.-S. Foo, and X. Xu, ``On the adversarial
+risk of test time adaptation: An investigation into realistic test-time data
+poisoning,'' in \emph{Proc. Int. Conf. Learning Representations (ICLR)}, 2025.
+
+\bibitem{hoang2024rip}
+T.-H. Hoang, D. M. Vo, and M. N. Do, ``R.I.P.: A simple black-box attack on
+continual test-time adaptation,'' \emph{arXiv:2412.01154}, 2024.
+
+\bibitem{li2024ast}
+Z. Li, M. Wu, C. Jin, D. Yu, and H. Yu, ``Adversarial self-training for robustness
+and generalization,'' \emph{Pattern Recognition Letters}, vol. 185, pp. 117--123,
+2024.
+
+\bibitem{bena2025risk}
+N. Bena, M. Anisetti, E. Damiani, C. Y. Yeun, and C. A. Ardagna, ``Protecting
+machine learning from poisoning attacks: A risk-based approach,'' \emph{Computers
+\& Security}, vol. 155, art. 104468, 2025.
+
+\bibitem{han2025mimic}
+T. Han, W. Sun, Z. Ding, C. Fang, H. Qian, J. Li, Z. Chen, and X. Zhang, ``Mutual
+information guided backdoor mitigation for pre-trained encoders,'' \emph{IEEE Trans.
+Information Forensics and Security}, vol. 20, pp. 3414--3428, 2025.
+
+\bibitem{yang2025scalesign}
+L. Yang, Y. Miao, Z. Liu, Z. Liu, X. Li, D. Kuang, H. Li, and R. H. Deng,
+``Enhanced model poisoning attack and multi-strategy defense in federated
+learning,'' \emph{IEEE Trans. Information Forensics and Security}, vol. 20,
+pp. 3877--3892, 2025.
+
+\bibitem{zukaib2026d3flids}
+U. Zukaib, X. Cui, F. Niaz, D. Liang, C. Zheng, and S. U. Din, ``Defending federated
+learning-based intrusion detection systems against model poisoning attacks,''
+\emph{Neurocomputing}, vol. 698, art. 134208, 2026.
+
+\bibitem{basak2025dpad}
+S. Basak and K. Chatterjee, ``DPAD: Data poisoning attack defense mechanism for
+federated learning-based system,'' \emph{Computers and Electrical Engineering},
+vol. 121, art. 109893, 2025.
+
+\bibitem{nawshin2026concurrent}
+F. Nawshin, D. Unal, and P. N. Suganthan, ``Novel defense strategies for concurrent
+data and model poisoning attacks in federated learning,'' \emph{Knowledge-Based
+Systems}, vol. 345, art. 116057, 2026.
+
+\bibitem{xu2026feddrlpd}
+N. Xu, Y. Feng, N. Liu, M. Liu, Y. Li, and X. Fu, ``FedDRLPD: Deep reinforcement
+learning-based defense mechanism against poisoning attacks in federated learning,''
+\emph{Knowledge-Based Systems}, vol. 339, art. 115558, 2026.
+
+\bibitem{park2024medbn}
+H. Park, J. Hwang, S. Mun, S. Park, and J. Ok, ``MedBN: Robust test-time adaptation
+against malicious test samples,'' in \emph{Proc. IEEE/CVF Conf. Computer Vision and
+Pattern Recognition (CVPR)}, 2024. % TODO: add page range from the published proceedings
+
+\bibitem{liu2025contextual}
+A. Liu, Y. Zhou, X. Liu, T. Zhang, S. Liang, J. Wang, Y. Pu, T. Li, J. Zhang,
+W. Zhou, Q. Guo, and D. Tao, ``Compromising LLM driven embodied agents with
+contextual backdoor attacks,'' \emph{IEEE Trans. Information Forensics and
+Security}, vol. 20, pp. 3979--3994, 2025.
+
+\bibitem{liu2025antidotefl}
+Y. Liu, H. Zhang, M. Wang, Q. Xie, and Z. Sun, ``AntidoteFL: Enhancing defense
+against poisoning attacks in federated learning,'' \emph{Computer Networks},
+vol. 269, art. 111427, 2025.
+
+\bibitem{huang2024ldpguard}
+K. Huang, G. Ouyang, Q. Ye, H. Hu, B. Zheng, X. Zhao, R. Zhang, and X. Zhou,
+``LDPGuard: Defenses against data poisoning attacks to local differential privacy
+protocols,'' \emph{IEEE Trans. Knowledge and Data Engineering}, vol. 36, no. 7,
+pp. 3195--3209, 2024.
+
+\bibitem{shi2025h3ni}
+H. Shi, B. Zeng, R. Yu, Y. Yang, Z. Zouxia, C. Hu, and R. Shi, ``H3NI:
+Non-target-specific node injection attacks on hypergraph neural networks via genetic
+algorithm,'' \emph{Neurocomputing}, vol. 613, art. 128746, 2025.
+
+\bibitem{chen2025mghga}
+Y. Chen, S. Picek, Z. Ye, Z. Wang, and H. Zhao, ``Momentum gradient-based untargeted
+poisoning attack on hypergraph neural networks,'' \emph{Neurocomputing}, vol. 634,
+art. 129835, 2025.
+
+\bibitem{zhang2025cola}
+X. Zhang and P. Bao, ``Multi-view contrastive learning for graph adversarial
+defense,'' \emph{Neural Networks}, vol. 192, art. 107868, 2025.
+
+\bibitem{wang2026insulator}
+Q. Wang, C. Yang, J. Du, N. Li, J. Wang, H. Han, Y. Hu, W. Peng, and J. Sun,
+``Adversarial attack-defense framework for enhancing the robustness of power
+insulator detection in cloud-edge deployment,'' \emph{Engineering Applications of
+Artificial Intelligence}, vol. 166, art. 113625, 2026.
+
+\end{thebibliography}
+
+\end{document}
