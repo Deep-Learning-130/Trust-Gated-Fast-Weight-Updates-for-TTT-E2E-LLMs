@@ -186,7 +186,8 @@ per-token-index curves at 128 K context, which needs at least a few hundred sequ
 > 2.5× compression assumption, that is **≈ 5.25 B tokens — 5.25× the top of the 50 M–1 B
 > range guessed in August.** §6's first listed way this model blows up has fired.
 >
-> The token count is still an *estimate*, because it inherits the compression guess:
+> The token count below was an *estimate* inheriting the compression guess. **It is
+> superseded by the exact figure further down — read that instead.**
 >
 > | if compression is | tokens | sequences @ 8K |
 > |---|---|---|
@@ -237,6 +238,54 @@ per-token-index curves at 128 K context, which needs at least a few hundred sequ
 > but only as a **dated, written revision made before the run**, in `PREREGISTERED.md` and
 > `TOLERANCE.md`. Made afterwards it is indistinguishable from moving the bar. **The Lead
 > decides; this document records the options and does not pick one.**
+
+> ### EXACT, from `val/zarr.json`, 2026-09-14 — **2,000,168,321 tokens**
+>
+> The estimate above was wrong by 2.62×, and the cause is an assumption in this very
+> section. **There is no compression.** The stored array's codec list is `[{"name":
+> "bytes"}]` — endianness only. §2.2's *"`BloscCodec(cname="zstd", clevel=3, shuffle)`
+> ... assume ≈ 2.5×"* was read off `lm_dataset.py:12`, where the vendor *constructs* a codec
+> and passes it to `open_array`; the array on disk was never written with it. Zarr v3 reads
+> per the stored metadata, so that passed codec is inert.
+>
+> | field | value |
+> |---|---|
+> | `shape` | **2,000,168,321** tokens |
+> | `data_type` | `uint32` (not `int32` as §2.2 said — same width, so byte math unaffected) |
+> | `chunk_shape` | **100,000,000** tokens → **21 chunks**, 400 MB each |
+> | `codecs` | `bytes` only — **uncompressed** |
+> | `fill_value` | 0 |
+>
+> **The `du` decomposes exactly**, which is the strongest confirmation available without
+> downloading anything: 21 × 100,000,000 × 4 B = 8,400,000,000 B, plus 517 B of `zarr.json`,
+> equals the measured 8,400,000,517 B to the byte. The 21st chunk is full-size on disk while
+> only 168,321 of its tokens are in bounds.
+>
+> **Revised consequences — milder than the block above claimed.** At §3's rates the full
+> split is **1.8 h nominal / 7.4 h bad day**, not 19 h. A nominal session totals ≈ 4.9 h,
+> which at $2–4/GPU-h is **$10–20 — inside §7's expected $10–35**. The full pass is
+> affordable. Only the bad-day path still conflicts with §7's 12 h hard stop: non-eval time
+> (≈ 8.3 h bad day) plus a 7.4 h eval completes at ≈ 16 h.
+>
+> **So subsampling is an optimisation, not a rescue.** 2.00 B tokens is still 2× the top of
+> the assumed band, but the band's practical consequence has largely evaporated.
+>
+> **If it is done, the chunking makes it clean.** Chunks are 100 M tokens, so a truncation on
+> a chunk boundary needs no partial-chunk handling: copy chunk files `c/0`…`c/k-1` and write
+> a local `val/zarr.json` with `shape: [k * 100000000]`. `len(ds)` is then honest and no
+> absent chunk is ever read as fill value.
+>
+> | chunks | tokens | egress | eval (nom / bad) | sequences @ 8K | SE vs the 0.491-nat band |
+> |---|---|---|---|---|---|
+> | 3 | 300 M | $0.14 | 0.27 h / 1.11 h | 36,621 | 0.0016 (0.33%) |
+> | 5 | 500 M | $0.24 | 0.45 h / 1.85 h | 61,035 | 0.0012 (0.24%) |
+> | 10 | 1.0 B | $0.48 | 0.90 h / 3.70 h | 122,070 | 0.0009 (0.18%) |
+> | **21 (all)** | **2.0 B** | **$1.01** | **1.89 h / 7.77 h** | **256,347** | **0.0006 (0.12%)** |
+>
+> Three chunks buys a bad-day session fitting inside every existing limit, at a cost of
+> 0.0010 nats of precision against a 0.491-nat bar. **Still the Lead's call, and still a
+> dated written revision if taken — but it is no longer forced, and the honest framing is
+> that the full pass is defensible too.**
 
 ### 2.3 Total egress
 
@@ -424,6 +473,7 @@ moment.
 | 2026-09-14 | §2.1 checkpoint sizes **measured** (1B = 5.35 GB, −9.4% vs estimate; 125M = 0.68 GB). §1.1's store layout **falsified**. | First probe with a real billing account, supplied by P3. |
 | 2026-09-14 | Store root corrected to `gs://llama3-books3/data.zarr` in §1.1, `EVAL_ENTRYPOINT.md`, `bootstrap_gpu_box.sh` and `probe_gcs_access.sh`. | Bucket listing. The selective-copy recipe stands; only the prefix was wrong. |
 | 2026-09-14 | §2.2 `/val` **measured at 8.40 GB (≈5.25 B tokens)** — 5.25× over the assumed band. §6's first blow-up condition fired; §7's 12 h hard stop and §4's 12 h bad-day total are both unreachable with a full pass. **No cap or bar changed.** | T1.3 complete. The decision it forces belongs to the Lead, in writing, before any run. |
+| 2026-09-14 | §2.2 `/val` **exact: 2,000,168,321 tokens**, uint32, **uncompressed**, 21 × 100 M-token chunks. The 2.5× compression assumption was wrong; the 5.25 B estimate overstated by 2.62×. Full pass is 1.8 h nominal, inside the expected cost range. | `val/zarr.json`. Subsampling downgraded from necessary to optional. |
 
 ---
 
