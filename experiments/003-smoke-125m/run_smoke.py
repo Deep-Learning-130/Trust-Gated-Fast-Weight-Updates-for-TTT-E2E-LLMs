@@ -432,6 +432,35 @@ def check_eval_differs(c, binding, mesh, carry, eval_tokens, condition):
 # ---------------------------------------------------------------------------
 
 
+def code_revision() -> str:
+    """Identify the checked-out revision, so every run says what it ran.
+
+    Three sessions of this experiment were spent on a stale checkout: the output
+    was byte-identical each time and read as a persistent technical failure
+    rather than an un-applied `git pull`. A result that cannot name its own code
+    is not reproducible, and more immediately it cannot be told apart from the
+    run before it.
+    """
+    import subprocess
+
+    def _git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(ROOT), *args],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    try:
+        head = _git("rev-parse", "--short", "HEAD")
+        if head.returncode != 0:
+            return "unknown (git failed: " + head.stderr.strip()[:80] + ")"
+        dirty = _git("status", "--porcelain").stdout.strip()
+        return head.stdout.strip() + (" +local-changes" if dirty else "")
+    except Exception as exc:  # noqa: BLE001 - never block the run on this
+        return "unknown (" + type(exc).__name__ + ")"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -488,6 +517,7 @@ def main():
         )
         return 2
 
+    print("runner revision: " + code_revision())
     check_gpu()
     if not CHECKS[-1].passed:
         print(f"\n[FAIL] gpu-present: {CHECKS[-1].detail}", file=sys.stderr)
@@ -577,6 +607,7 @@ def main():
                     "mini_batch_size": binding.mini_batch_size,
                     "compute_dtype": args.compute_dtype or "bf16 (config default)",
                     "param_dtype": args.param_dtype or "fp32 (config default)",
+                    "code_revision": code_revision(),
                     "suffix_len": binding.suffix_len,
                 },
                 "checks": [
