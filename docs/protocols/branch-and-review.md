@@ -44,8 +44,8 @@ In order. The first four are mechanical and non-negotiable; the rest need judgem
 
 1. **`git -C vendor/ttt-e2e status` is clean.** ADR-002: the vendor tree has no licence and
    must never be edited. Any diff inside `vendor/` blocks the merge outright.
-2. **CPU tests pass:** `PYTHONPATH=src JAX_PLATFORMS=cpu pytest` — **165 tests** as of
-   2026-08-27. The count is expected to grow; a branch that *reduces* it is the thing to
+2. **CPU tests pass:** `PYTHONPATH=src JAX_PLATFORMS=cpu pytest` — **193 tests** as of
+   2026-09-12. The count is expected to grow; a branch that *reduces* it is the thing to
    question, and a branch that changes it without updating this line makes the check a lie.
 3. **No `gate/` code before the Phase 1 spike returns PROCEED** (Rule 2). Gate work is sunk
    cost if the verdict is STOP. Attack machinery is fine early; it is needed either way.
@@ -95,5 +95,5 @@ Both workers acknowledge this document before their first push. Record it here.
 | Person | Role | Acknowledged | Date |
 |---|---|---|---|
 | Person 1 | Lead | — | — |
-| Person 2 | Worker A | — | — |
+| Person 2 | Worker A | ✓ | 2026-09-12 |
 | Person 3 | Worker B | — | — |

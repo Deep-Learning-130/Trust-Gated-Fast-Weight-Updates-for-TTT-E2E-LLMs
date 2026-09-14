@@ -463,3 +463,140 @@ def assert_stream_not_from_eval_split(stream: CraftedStream, benign_eval_split: 
             f"the benign eval split. The control would be in-domain to the "
             f"measurement and the poison would not."
         )
+
+
+def build_paraphrase_stream(
+    corpus: TokenCorpus,
+    length_tokens: int,
+    seed: int,
+    *,
+    tokenizer,
+    perturbation_fn: Callable[[np.ndarray], np.ndarray],
+    span_tokens: int = DEFAULT_SPAN_TOKENS,
+    mini_batch_size: int = 1024,
+    offset_range: tuple[int, int] | None = None,
+) -> CraftedStream:
+    """PARAPHRASE strategy: perturb spans within a semantic-similarity ball.
+
+    T2.5 implementation. Blocked on T3.2 (tokenizer) for actual execution.
+
+    Takes a base stream (via SELECT), decodes each span to text, applies a
+    perturbation function that stays within a semantic-similarity ball, then
+    re-encodes. The perturbation must preserve length (or be padded/truncated
+    to match).
+
+    Args:
+        corpus: token-ID stream to draw spans from
+        length_tokens: target stream length (must divide span_tokens and mini_batch_size)
+        seed: for reproducible span sampling
+        tokenizer: injected tokenizer with decode() and encode() methods
+        perturbation_fn: takes decoded text, returns perturbed text within similarity ball
+        span_tokens: span size (default 64)
+        mini_batch_size: vendor's inner-loop chunk size (default 1024)
+        offset_range: restrict sampling to this corpus region
+    """
+    raise NotImplementedError(
+        "PARAPHRASE blocked on T3.2 (independent fluency reference model with tokenizer). "
+        "The perturbation_fn must edit text and cannot work in ID space. "
+        "Interface is ready; implementation requires tokenizer decode/encode."
+    )
+
+
+def build_soft_stream(
+    corpus: TokenCorpus,
+    length_tokens: int,
+    seed: int,
+    *,
+    embedding_matrix: np.ndarray,
+    optimization_fn: Callable[[np.ndarray], np.ndarray],
+    span_tokens: int = DEFAULT_SPAN_TOKENS,
+    mini_batch_size: int = 1024,
+    offset_range: tuple[int, int] | None = None,
+) -> CraftedStream:
+    """SOFT strategy: optimize in embedding space, project back to tokens.
+
+    T2.5 implementation. Blocked on model access for embedding matrix and
+    gradient computation.
+
+    Starts with continuous embeddings, optimizes via gradient descent, projects
+    back to discrete tokens each step (argmax over vocab). Strongest attack,
+    least realistic -- report as upper bound, never headline.
+
+    Args:
+        corpus: token-ID stream to initialize from
+        length_tokens: target stream length
+        seed: for reproducible initialization
+        embedding_matrix: vocab_size x embed_dim matrix from the model
+        optimization_fn: takes embeddings, returns optimized embeddings
+        span_tokens: span size (default 64)
+        mini_batch_size: vendor's inner-loop chunk size (default 1024)
+        offset_range: restrict sampling to this corpus region
+    """
+    raise NotImplementedError(
+        "SOFT blocked on model access for embedding matrix and gradient computation. "
+        "Interface is ready; implementation requires forward passes and projection."
+    )
+
+
+def generate_seed_pairs(
+    corpus: TokenCorpus,
+    length_tokens: int,
+    seeds: list[int],
+    *,
+    craft_fn: Callable[[int], OrderFn] | None = None,
+    span_tokens: int = DEFAULT_SPAN_TOKENS,
+    mini_batch_size: int = 1024,
+    offset_range: tuple[int, int] | None = None,
+) -> list[tuple[CraftedStream, CraftedStream]]:
+    """Generate per-seed poison/control pairs for the attack spike.
+
+    T2.6 implementation. For each seed, builds a poison stream (with adversarial
+    ordering from craft_fn when available) and a length-matched control (random
+    ordering). Asserts structural matching.
+
+    Args:
+        corpus: token-ID stream to draw spans from
+        length_tokens: target stream length for each stream
+        seeds: list of seeds (typically [0, 1, 2, 3, 4] for 5 seeds)
+        craft_fn: seed -> order_fn for adversarial ordering. None = random ordering
+            (not a real attack; for testing the orchestration only).
+        span_tokens: span size (default 64)
+        mini_batch_size: vendor's inner-loop chunk size (default 1024)
+        offset_range: restrict sampling to this corpus region
+
+    Returns:
+        List of (poison, control) pairs, one per seed. Each pair passes
+        assert_streams_matched.
+    """
+    if not seeds:
+        raise ValueError("no seeds: the pre-registration requires 5 per condition")
+
+    pairs: list[tuple[CraftedStream, CraftedStream]] = []
+
+    for seed in seeds:
+        order_fn = craft_fn(seed) if craft_fn is not None else None
+
+        poison = build_select_stream(
+            corpus,
+            length_tokens,
+            seed,
+            span_tokens=span_tokens,
+            mini_batch_size=mini_batch_size,
+            offset_range=offset_range,
+            order_fn=order_fn,
+        )
+
+        control = build_benign_control(
+            corpus,
+            length_tokens,
+            seed,
+            span_tokens=span_tokens,
+            mini_batch_size=mini_batch_size,
+            offset_range=offset_range,
+        )
+
+        assert_streams_matched(poison, control)
+
+        pairs.append((poison, control))
+
+    return pairs
