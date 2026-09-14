@@ -15,7 +15,7 @@ than being reconstructed at the end.
 > the repo still has its full options and should reach counsel before it reaches `main`;
 > and working attack artifacts still wait on coordinated disclosure to the TTT-E2E authors.
 
-**Inventor(s):** TBD
+**Inventor(s):** Manas Maahir R (2026-09-14), Jay Krishna Kamlekar (2026-09-14), Kartheek Yadav (2026-09-14)
 **Date of conception:** on/around 2026-07-28 (this repo's initial commit; the git
 history is the supporting record — do not rewrite it).
 **Date of first public disclosure:** **2026-08-01** (repository made public). This is the

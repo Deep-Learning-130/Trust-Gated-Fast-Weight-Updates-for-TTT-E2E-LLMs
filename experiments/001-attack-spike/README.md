@@ -29,10 +29,16 @@ python -m trustgate.eval.harness \
 Produces `results/report.md` via `trustgate.eval.report`, which prints observed
 vs. pre-registered values and a PROCEED/STOP verdict.
 
-## Outputs (git-ignored)
+## Outputs and Archiving Layout (git-ignored)
 
-`results/` — per-seed losses, crafted streams, the go/no-go report. Commit only
-the final `report.md` (copy it out of `results/`), not the raw runs.
+`results/` is the designated output directory for all experiment artifacts. By convention, a run must produce the following layout:
+- `results/losses/` — Per-seed losses (`*.npy` files).
+- `results/streams/` — Crafted streams and their benign controls.
+- `results/logs/` — Raw execution logs.
+- `results/env.json` — The environment block recording package versions and hardware state.
+
+> [!IMPORTANT]
+> `results/` and `*.npy` files are explicitly git-ignored. To ensure a run leaves a permanent record, you **must** manually copy `report.md` out of `results/` and commit it. The raw `.npy` files and streams should be archived to external storage if needed, as they will not be tracked by git.
 
 ---
 
