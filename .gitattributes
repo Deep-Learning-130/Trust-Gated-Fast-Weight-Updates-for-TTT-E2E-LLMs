@@ -5,3 +5,9 @@
 # clone would fail the digest check on a file nobody had touched.
 # -text pins the bytes in both directions.
 experiments/002-pilot-tiny-ttt/corpus.txt -text
+
+# Shell scripts must check out with LF even on Windows. Several of these are
+# pasted into Google Cloud Shell or run under WSL, and a CRLF shebang fails
+# there as `/usr/bin/env: 'bash\r': No such file or directory` -- an error that
+# names neither the file nor line endings, on a script that runs fine locally.
+*.sh text eol=lf
