@@ -195,6 +195,56 @@ run.** It has no pre-registered numeric bar (TOLERANCE.md §6) and needs none; i
 
 ---
 
+### 4.1 The total above is understated, because `/val` turned out to be 2 B tokens
+
+**Added 2026-09-15.** §4's table was built when §2.2 assumed 50 M – 1 B tokens, and
+its eval-pass line reads 0.9 h nominal at "250 M / 1 B tokens". The probe settled
+the number: `/val` is **2,000,168,321 tokens** (§2.2). §3's own table prices that
+row at **7.45 h**, not 0.9 h.
+
+| | §4 as written | with the measured `/val` |
+|---|---|---|
+| eval pass | 0.9 h | **7.45 h** |
+| everything else | 3.1 h | 3.1 h |
+| **nominal total** | **≈ 4 h** | **≈ 10.5 h** |
+| **bad day** | ≈ 12 h | **≈ 23 h** |
+
+The original table is left as written rather than edited, because what it got
+wrong is the interesting part: every line except the eval pass held.
+
+**This collides with the 12 GPU-hour hard stop.** A full-split 1B run is inside
+it nominally, with 1.5 h of margin, and outside it on any bad day. The hard stop
+is not a budget to be spent down to — it exists so that a session that is going
+wrong gets abandoned rather than extended.
+
+#### The fix is the fetch, not the eval
+
+`loop.py:98-109` runs the entire split and there is no `num_eval_batches` (§3).
+But **what is on disk is what gets evaluated**, and `/val` is uncompressed zarr
+in 21 chunks of 100,000,000 tokens (§2.2). Fetching fewer chunks is therefore
+the subsample knob the vendor does not expose:
+
+| fetched | tokens | sequences @8K | 1B eval | SE of mean CE |
+|---|---|---|---|---|
+| 1 chunk | 100 M | 12,207 | **0.37 h** | 0.0027 nats |
+| 3 chunks | 300 M | 36,621 | 1.12 h | 0.0015 nats |
+| all 21 | 2,000 M | 244,161 | 7.45 h | 0.0006 nats |
+
+`TOLERANCE.md`'s band is **0.491 nats wide**. One chunk's standard error is
+**185× smaller than the band**; the full split buys 0.0021 nats of precision for
+7 hours of GPU time. Against a bar that wide, that is not a measurement
+improvement, it is a rounding error bought at the hard stop's expense.
+
+**Stated before any result is seen, so it cannot be a post-hoc choice.** Which
+fraction of `/val` is evaluated is a sampling decision, not a bar: `TOLERANCE.md`
+is untouched and Standing Rule 5 is not in play. What *would* be in play is
+choosing the fraction after seeing where the number landed, so the fraction is
+fixed here, now, in writing: **three chunks**, which keeps the eval pass near §4's
+original 0.9 h assumption and holds the session inside the hard stop with room to
+spare.
+
+---
+
 ## 5. The 3B runs, priced alongside
 
 Priced now so a later scope change is costed rather than discovered.
