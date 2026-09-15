@@ -1,0 +1,7 @@
+# The pilot's frozen corpus is content-addressed: run_pilot.py checks its
+# sha256 against a digest pinned in the source, and refuses on a mismatch.
+# This repository is developed on Windows with core.autocrlf=true, which would
+# rewrite every LF to CRLF on checkout and change those bytes -- so a fresh
+# clone would fail the digest check on a file nobody had touched.
+# -text pins the bytes in both directions.
+experiments/002-pilot-tiny-ttt/corpus.txt -text
