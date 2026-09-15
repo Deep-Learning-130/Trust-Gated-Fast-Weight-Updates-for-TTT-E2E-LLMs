@@ -105,8 +105,13 @@ def slide(prs, title):
 
 
 def lines(s, top, items, size=17, gap=11, width=Inches(11.0)):
-    """Short statements, one line each where possible."""
-    tf = _box(s, L0, top, width, Inches(4.0))
+    """Short statements, one line each where possible.
+
+    The box is clamped to the space left above the footer rather than given a
+    fixed height. A textbox taller than the slide does not complain and does not
+    show -- until someone adds one more line, at which point it clips silently.
+    """
+    tf = _box(s, L0, top, width, min(Inches(4.0), H - top - Inches(0.72)))
     for i, item in enumerate(items):
         head, tail = item if isinstance(item, tuple) else (item, "")
         p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
@@ -167,7 +172,7 @@ def picture(s, path, top, height_in):
 
 
 def note(s, top, text, size=12.5):
-    tf = _box(s, L0, top, Inches(11.0), Inches(0.9))
+    tf = _box(s, L0, top, Inches(11.0), min(Inches(0.9), H - top - Inches(0.72)))
     _para(tf, True, text, size, space_after=0, line=1.3, italic=True)
 
 
