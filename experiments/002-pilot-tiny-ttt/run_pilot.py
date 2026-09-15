@@ -44,6 +44,8 @@ from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+import hashlib
+
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
@@ -83,27 +85,65 @@ DOSE_LENGTHS = [512, 1024, 2048, 4096, 8192]
 # --------------------------------------------------------------------------
 # Corpus
 # --------------------------------------------------------------------------
+#: SHA-256 of `corpus.txt`. Printed on every run and written into the results,
+#: so a number can be tied to the exact bytes that produced it.
+CORPUS_SHA256 = "cc2adbc868e195e3a589b3aab775b4a279bcf55d39b45b95b487839431ebc3c6"
+
+#: The commit whose prose `corpus.txt` freezes -- the commit that introduced
+#: this experiment. Reconstructible with `git show a225c91:<path>` over the
+#: same file selection, so the snapshot is auditable rather than merely asserted.
+CORPUS_COMMIT = "a225c91"
+
+
 def load_corpus_bytes() -> np.ndarray:
-    """Byte stream of this repository's own English prose.
+    """Byte stream of this repository's own English prose, FROZEN.
 
     Entirely local: no download, no GCS, no requester-pays bucket. The pilot is
     a mechanism demonstration, and for that the corpus only has to be real
     natural-language text with real structure.
+
+    Why this reads a committed file instead of globbing
+    ---------------------------------------------------
+    It used to glob `docs/**/*.md`, `experiments/**/*.md` and `*.md` live, at
+    run time. That made **the repository's own documentation the training data**,
+    so every commit touching a markdown file silently changed the experiment.
+
+    It was not a theoretical problem. Measured 2026-09-15: the README describes a
+    412 KB corpus; the live glob had reached 672 KB across 47 files. Re-running
+    the pilot after a morning of editing two unrelated README files moved Cohen's
+    *d* from +0.0535 to -1.2838 -- across zero, and past the pre-registered
+    |d| >= 0.8 bar in the opposite direction. Same code, same seeds, same config;
+    deterministic within a session and different between them.
+
+    Worse, the glob included `experiments/003-smoke-125m/README.md`, which
+    documents an experiment *downstream* of this one. Writing up a later result
+    changed an earlier one.
+
+    The frozen snapshot is the prose as of CORPUS_COMMIT, so a result file now
+    names bytes that can be recovered. `.txt`, not `.md`, so it can never feed
+    itself back in.
     """
-    paths = sorted(
-        list((ROOT / "docs").rglob("*.md"))
-        + list((ROOT / "docs").rglob("*.tex"))
-        + list((ROOT / "experiments").rglob("*.md"))
-        + list(ROOT.glob("*.md"))
+    frozen = HERE / "corpus.txt"
+    if frozen.exists():
+        raw = frozen.read_bytes()
+        got = hashlib.sha256(raw).hexdigest()
+        if got != CORPUS_SHA256:
+            raise SystemExit(
+                f"corpus.txt does not match the pinned digest.\n"
+                f"  expected {CORPUS_SHA256}\n"
+                f"  got      {got}\n"
+                "Every number this experiment has ever produced is a function of "
+                "these bytes. Restore the file rather than re-pinning the digest."
+            )
+        return np.frombuffer(raw, dtype=np.uint8).astype(np.int32)
+
+    raise SystemExit(
+        f"{frozen} is missing.\n"
+        "Refusing to fall back to a live glob of the repository's markdown: that "
+        "is the defect this file exists to prevent, and it fails silently by "
+        "producing plausible numbers from a corpus nobody can reconstruct.\n"
+        f"Restore it from git, or rebuild it from {CORPUS_COMMIT}."
     )
-    chunks = []
-    for p in paths:
-        try:
-            chunks.append(p.read_text(encoding="utf-8", errors="ignore"))
-        except OSError:
-            continue
-    raw = "\n\n".join(chunks).encode("utf-8", errors="ignore")
-    return np.frombuffer(raw, dtype=np.uint8).astype(np.int32)
 
 
 def split_corpus(tokens: np.ndarray):
