@@ -42,9 +42,12 @@ trap 'rm -f "$TMP" "$TMP.want"' EXIT
 # LC_ALL=C so the sort order is byte order and the manifest hash is portable.
 # A read loop rather than `xargs -d` / `find -printf`, both of which are GNU-only.
 echo "==> Hashing $DEST (this reads every byte; ~1 min per 5 GB)"
+# The sed normalises binary-mode output: Git Bash on Windows prints `hash *./file`
+# where Linux prints `hash  ./file`, so a manifest written on one would falsely
+# mismatch on the other.
 ( cd "$DEST" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do
     sha256 "$f"
-  done ) > "$TMP"
+  done ) | sed 's/^\([0-9a-f]\{64\}\) \*/\1  /' > "$TMP"
 
 FILE_COUNT="$(grep -c . "$TMP" || true)"
 [[ "$FILE_COUNT" -gt 0 ]] || { echo "ERROR: $DEST contains no files" >&2; exit 1; }
@@ -53,7 +56,7 @@ LOCAL_BYTES="$( cd "$DEST" && find . -type f -exec cat {} + | wc -c | tr -d ' ' 
 
 if [[ -n "${VERIFY:-}" ]]; then
   [[ -f "$VERIFY" ]] || { echo "ERROR: VERIFY manifest $VERIFY not found" >&2; exit 1; }
-  grep -v '^#' "$VERIFY" | grep . > "$TMP.want" || true
+  grep -v '^#' "$VERIFY" | grep . | tr -d '\r' | sed 's/^\([0-9a-f]\{64\}\) \*/\1  /' > "$TMP.want" || true
   if ! diff -q "$TMP.want" "$TMP" >/dev/null; then
     echo "ERROR: $DEST does not match $VERIFY" >&2
     diff "$TMP.want" "$TMP" | head -20 >&2 || true   # diff exits 1 here; keep exit 3
