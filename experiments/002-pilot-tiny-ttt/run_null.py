@@ -126,7 +126,20 @@ def main() -> int:
     absd = np.abs(np.array(null_ds))
     bar = FROZEN.min_effect_size
     fpr = float((absd >= bar).mean())
-    observed = 0.8313  # run_deep.py, same model and protocol
+    # Read from results/deep.json rather than pasted in. The literal that used
+    # to sit here -- 0.8313 -- outlived the run that produced it: the corpus was
+    # a live glob of the repository's own markdown until 2026-09-15, so the deep
+    # run's d moved to -0.003 once the corpus was frozen, while this constant
+    # did not. A hardcoded comparison value silently keeps quoting a number the
+    # code can no longer produce.
+    deep_path = HERE / "results" / "deep.json"
+    if not deep_path.exists():
+        raise SystemExit(
+            f"{deep_path} is missing. Run run_deep.py first -- this study's "
+            "whole point is to locate that run's d inside this null, so there "
+            "is nothing to report without it."
+        )
+    observed = json.loads(deep_path.read_text())["effect_size"]
 
     payload = {
         "note": "Null distribution of Cohen's d under control-vs-control. "
