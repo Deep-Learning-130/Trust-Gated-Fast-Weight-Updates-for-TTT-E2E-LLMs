@@ -18,7 +18,7 @@ the session is driven by `scripts/run_gpu_session.sh` per `gpu-session-1-runbook
 
 | Task | Owner | Est. h | Budget | Notes |
 |---|---|---|---|---|
-| **Prerequisite, no GPU:** own GCP billing via UPI prepay; Cloud Shell probe passes; W&B preflight passes | Manas | 0 | ₹500–1,000 GCP prepay (egress uses ~₹60–120) | Jaykay is on leave, and his 2026-09-14 run was metadata only, so no files exist. The download now happens on the box itself, in parallel with `uv sync`. |
+| **Prerequisite, no GPU:** a teammate issues a service-account key on a billing-enabled GCP project; `gsutil du` with it prints 5347020507; W&B preflight passes | Manas + key holder | 0 | ~₹60–120 egress on the key holder's project | Manas cannot use Google Cloud himself (locked out). Jaykay's 2026-09-14 run was metadata only, so no files exist, and there is no non-Google mirror. |
 | `P0-1`/`T1.4` provision, gcloud login, `bootstrap_gpu_box.sh` (download + env), smoke pass | Manas | 1.0 | ~₹220 | Access is checked in seconds before anything slow; a bad GPU image is caught at Step 3. |
 | `T1.5`/`T1.6` baseline eval, 1B Books @8K, **50M tokens**, ×2 for bar S2 | Manas | 1.5 | ~₹330 | Each run recompiles; ~20–25 min per pass on an A100 (`TOLERANCE.md` §8, second note). |
 | `T1.7` negative control, acceptance, redacted copy-out, destroy box | Manas | 0.5 | ~₹110 | `check_baseline_acceptance.py` prints the verdict; read the bar first. |

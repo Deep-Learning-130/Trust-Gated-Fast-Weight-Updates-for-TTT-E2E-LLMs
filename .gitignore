@@ -29,6 +29,9 @@ venv/
 
 # Env / secrets (GCP billing project id, etc.)
 .env
+# Google service-account keys (GPU session 1 runbook). The repo is public.
+*sa-key*.json
+*service-account*.json
 *.local
 
 # Local working docs (not part of the tracked tree)

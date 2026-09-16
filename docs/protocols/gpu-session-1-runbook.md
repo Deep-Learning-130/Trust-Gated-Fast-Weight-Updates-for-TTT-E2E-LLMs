@@ -1,15 +1,18 @@
 # GPU session 1: runbook
 
-> **One page, in order.** Revised 2026-09-16 for the lowest-cost route. Manas takes over the
-> data download (Jaykay is on leave; his 2026-09-14 probe was metadata only, so no files exist
-> anywhere yet). Target: **the 1B Books @8K baseline in one E2E session of about 3 hours.**
+> **One page, in order.** Revised 2026-09-16 for the lowest-cost route. **Manas cannot use
+> Google Cloud himself** (locked out after the failed signups). Jaykay's 2026-09-14 probe
+> downloaded nothing, and there is still no non-Google mirror: the only HF 1B "e2e" repo is a
+> retrained routed variant, not the released checkpoint. So a teammate with working GCP billing
+> issues a **service-account key**, and the box downloads with it. Manas never logs in to Google.
+> Target: **the 1B Books @8K baseline in one E2E session of about 3 hours.**
 > Tasks `P0-1` / `T1.4`–`T1.7`. Detail: `COST_MODEL.md` §4/§9, `TOLERANCE.md` §4, §5 and §8.
 
 ## Cost plan
 
 | Item | Estimate | Note |
 |---|---|---|
-| GCP UPI prepayment | ₹500–1,000, **once** | Sits as credit on the billing account. Egress uses about ₹60–120 of it |
+| Download egress, billed to the **teammate's** GCP project | ~₹60–120 | Jaykay's project already has working billing (his probe succeeded) |
 | Download egress | ~5.75 GB | 5.35 GB checkpoint plus **one** 0.4 GB `/val` chunk |
 | **E2E A100 80 GB**, ~3 h | $2.10/h ≈ **₹650 incl. 18% GST** | Bad day, 4 h: ≈ ₹870 |
 
@@ -22,31 +25,42 @@
 
 ---
 
-## Part A: before renting (free, laptop)
+## Part A: before renting (free)
 
-### A1. Google Cloud billing, paid by UPI (one time)
-1. Go to <https://console.cloud.google.com> and create a **project**, e.g. `ttt-egress`.
-2. Go to **Billing → Create billing account**, country India, and choose **UPI** as the payment method. Google asks for a **prepayment (typically ₹500–1,000)**; pay it by scanning the QR code with your UPI app. Docs: [Use UPI for Google Cloud payments](https://docs.cloud.google.com/billing/docs/resources/upi-payment-india).
-3. Link the billing account to the project, and note the **project ID** (not the name).
-4. An India billing account must complete **identity verification within 30 days**, or Google suspends it. Do it now, while you remember.
+### A1. A teammate issues a service-account key (~10 min, their Google account)
+Whoever holds a GCP project **with billing enabled** does this. Jaykay's project already
+works, and this can be done from a phone browser. Otherwise any teammate or the faculty advisor can create a project.
 
-### A2. Prove access for free: Google Cloud Shell (no install)
-Open Cloud Shell (the `>_` icon, top right of the console). Upload `scripts/probe_gcs_access.sh`, then:
+1. Open **console.cloud.google.com → IAM & Admin → Service Accounts**, making sure the billing-enabled project is selected.
+2. Click **Create service account**. Name it `ttt-egress` and grant the role **Service Usage Consumer**. That is the only role needed: the buckets are readable, and this role only lets the project pay the requester-pays egress.
+3. Open the account, go to **Keys → Add key → Create new key → JSON**. A `.json` file downloads.
+4. Send Manas two things **privately**, never in the repo, a public chat or a GitHub issue:
+   - the key file;
+   - the **project ID**.
+5. **After the session, delete the key** on the same Keys page. The credential then stops working everywhere.
+
+If step 3 says key creation is disabled by an organisation policy, the project belongs to an
+organisation that forbids keys. Use a personal project instead.
+
+### A2. Prove the key works (laptop, WSL, free)
+Rename the key to `sa-key.json` and keep it **outside the repo**, e.g. `~/sa-key.json`. Then:
 ```bash
-GCP_BILLING_PROJECT=<project-id> bash probe_gcs_access.sh
+curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts && export PATH="$HOME/google-cloud-sdk/bin:$PATH"
+gcloud auth activate-service-account --key-file=$HOME/sa-key.json   # the SA, not your Google account
+gsutil -u <project-id> du -s gs://ttt-e2e-checkpoints/1b_ttt_e2e_finetune_books_8k_1x_cc
 ```
-It must print `ckpt_1b_bytes: 5347020507`. This is metadata only (under $0.05). **If it fails, do not rent.** Fix billing first.
+It must print `5347020507`. That check is metadata only and costs almost nothing. **If it fails, do not rent.**
+Afterwards run `gcloud auth revoke --all` on the laptop.
 
-### A3. Prove W&B works (laptop, WSL or Git Bash)
+### A3. Prove W&B works
 ```bash
-WANDB_ENTITY=<you> WANDB_PROJECT=<project> WANDB_KEY=<key> \
-  uv run --no-project --with wandb==0.19.9 python scripts/preflight_wandb.py
+WANDB_ENTITY=<you> WANDB_PROJECT=<project> WANDB_KEY=<key> uv run --no-project --with wandb==0.19.9 python scripts/preflight_wandb.py
 ```
 It must end with `PREFLIGHT OK`.
 
 ### A4. Prepare for SSH and the booking
 - If you have no key yet, run `ssh-keygen -t ed25519`. You'll paste `~/.ssh/id_ed25519.pub` into E2E.
-- Top up about **₹1,000** of E2E credit via UPI (the extra is headroom).
+- Top up about **₹1,000** of E2E credit via UPI.
 - Add a claim row to `gpu-bookings.md`.
 
 ---
@@ -55,40 +69,41 @@ It must end with `PREFLIGHT OK`.
 
 ### B1. Rent (0:00)
 In the E2E console:
-- **GPU:** A100 80 GB, **on-demand, not spot**. A pre-empted spot box loses the session.
+- **GPU:** A100 80 GB, **on-demand, not spot**.
 - **Image:** Ubuntu 22.04 with CUDA ≥ 12.8.
 - **Disk:** ≥ 100 GB.
 - **SSH key:** yours, added.
 
-### B2. Log in, install gcloud, authenticate (0:05, ~10 min)
+### B2. Log in and copy the key over (0:05, ~5 min)
 ```bash
+# laptop
+scp ~/sa-key.json root@<box-ip>:/root/sa-key.json
+# box
 ssh root@<box-ip>
 tmux new -s ttt                       # always; reattach later with: tmux attach -t ttt
 nvidia-smi                            # "CUDA Version" must be >= 12.8, else destroy the box now
 git clone --recursive https://github.com/Manas-Maahir/Trust-Gated-Fast-Weight-Updates-for-TTT-E2E-LLMs.git TTT
 cd TTT && git checkout infra/gpu-session-1
-curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts && export PATH="$HOME/google-cloud-sdk/bin:$PATH"
-gcloud auth login --no-launch-browser   # open the printed link on your laptop, paste the code back
 ```
 
-### B3. Bootstrap (0:15, ~35 min)
+### B3. Bootstrap (0:10, ~35 min)
 ```bash
-export GCP_BILLING_PROJECT=<project-id>
+export GCP_SA_KEY=/root/sa-key.json  GCP_BILLING_PROJECT=<project-id>
 export WANDB_ENTITY=…  WANDB_PROJECT=…  WANDB_KEY=…
 bash scripts/bootstrap_gpu_box.sh
 ```
 What it does, in order:
-- **Checks GCS access in seconds** before anything slow starts.
+- **Installs gcloud and activates the key.** No login prompt.
+- **Checks GCS access in seconds.**
 - **Downloads in the background** while `uv sync` installs the environment.
 - **Proves JAX can compute on the GPU.**
-- **Waits for the download, then fingerprints the checkpoint.**
-- **Writes the eval commands.**
+- **Waits for the download, then fingerprints the checkpoint and writes the eval commands.**
 
 It must end with `Bootstrap complete`. To watch the download, open a second tmux window (`Ctrl-b c`) and run `tail -f ~/ttt-runs/bootstrap/fetch-*.log`.
 
 **If it stops:**
-- **At `gcs access`:** your project ID or billing is wrong. Fix it and re-run.
-- **At Step 3** (JAX can't use the GPU): **destroy the box.** Don't debug on the clock.
+- **At `gcs access` or the key:** the project ID, the role, or the key itself is wrong. Fix it and re-run.
+- **At Step 3** (JAX can't use the GPU): **destroy the box.**
 - **Anywhere else:** fix it and re-run. Every step resumes.
 
 ### B4. The session, unattended (0:50, ~2 h)
@@ -104,14 +119,18 @@ You can detach with `Ctrl-b d` and close the laptop. **What it handles on its ow
 
 ### B5. Copy out, sign out of Google, destroy the box (~2:50)
 ```bash
-# on the box: the copy-out folder has the W&B key removed; revoke Google credentials
-gcloud auth revoke --all
+# on the box: drop the Google credential before anything else
+gcloud auth revoke --all && shred -u /root/sa-key.json
 ```
 ```bash
 # on the laptop
 scp -r root@<box-ip>:/root/TTT/experiments/000-repro-baseline/results/session-*  experiments/000-repro-baseline/results/
 ```
-Check that `ACCEPTANCE.txt` and `SESSION_SUMMARY.txt` arrived, then **destroy the box in the E2E console**. Stopping it is not enough, because a stopped box still bills for storage. Copy **only** `results/session-*`, never the raw `~/ttt-runs`, whose logs contain the key.
+Check that `ACCEPTANCE.txt` and `SESSION_SUMMARY.txt` arrived, then:
+- **Destroy the box** in the E2E console. Stopping is not enough, because a stopped box still bills for storage.
+- **Ask the teammate to delete the service-account key** (A1 step 5).
+
+Copy **only** `results/session-*`. The raw `~/ttt-runs` logs contain your W&B key.
 
 ---
 

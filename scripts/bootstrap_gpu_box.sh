@@ -34,6 +34,7 @@
 #   CKPT_DIR=/mnt/data/<ckpt>                   # where the checkpoint lives (default: repo checkpoints/)
 #   CKPT_SHA_MANIFEST=path                      # verify a side-loaded checkpoint against this manifest
 #   GCP_BILLING_PROJECT=...                     # only needed if data must be fetched from GCS
+#   GCP_SA_KEY=/root/sa-key.json                # service-account key for that project; no Google login needed
 #   SKIP_DATA=1                                 # checkpoint only
 #   AUTO_INSTALL=0                              # refuse rather than install uv/gcloud
 #   ALLOW_SHA_DRIFT=1                           # accept a vendor SHA != the pin
@@ -161,8 +162,20 @@ if [[ "$need_gcs" == "1" ]]; then
   echo "    gcs       : NEEDED -- something above is missing from local disk"
   : "${GCP_BILLING_PROJECT:?Checkpoint or val subset is missing locally, and fetching it needs GCP_BILLING_PROJECT (requester-pays). Side-load both instead to avoid GCS entirely}"
   ensure_tool gsutil "the Google Cloud SDK"   'curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts && export PATH="$HOME/google-cloud-sdk/bin:$PATH"'
+  # A service-account key lets someone else's billing project pay the egress
+  # without the person on the box logging in to Google at all.
+  if [[ -n "${GCP_SA_KEY:-}" ]]; then
+    [[ -f "$GCP_SA_KEY" ]] || die "GCP_SA_KEY=$GCP_SA_KEY does not exist"
+    inside_repo "$GCP_SA_KEY" && die "GCP_SA_KEY is inside the repo. A credential must never sit in a
+       working tree that is pushed to a public remote. Move it outside $repo_root."
+    chmod 600 "$GCP_SA_KEY" 2>/dev/null || true
+    gcloud auth activate-service-account --key-file="$GCP_SA_KEY" >/dev/null 2>&1 \
+      || die "gcloud rejected the service-account key $GCP_SA_KEY (deleted, or not a JSON key file)"
+    echo "    gcloud    : service-account key activated"
+  fi
   if ! gcloud auth list --filter=status:ACTIVE --format="value(account)" 2>/dev/null | grep -q .; then
-    die "gcloud has no active account. Run:  gcloud auth login --no-launch-browser
+    die "gcloud has no active account. Either set GCP_SA_KEY=<key.json> (a service-account key
+       from whoever owns the billing project), or run: gcloud auth login --no-launch-browser
        Both buckets are requester-pays; the fetch cannot start without it."
   fi
   echo "    gcloud    : $(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)"
