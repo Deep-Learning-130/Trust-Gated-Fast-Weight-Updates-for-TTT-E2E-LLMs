@@ -62,6 +62,44 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--random-init",
+        action="store_true",
+        help=(
+            "Build a RANDOM-INIT victim instead of loading --checkpoint, and run "
+            "the full spike against it. Instrument validation only: a model that "
+            "has learned nothing has nothing worth corrupting, so this renders NO "
+            "verdict and the report says so. Its value is that every seam the real "
+            "run needs -- crafting, the seed loop, carry threading, fluency "
+            "scoring, report generation -- is proven to execute."
+        ),
+    )
+    parser.add_argument(
+        "--size",
+        default="125m",
+        help="Model size for --random-init. See trustgate.eval.model_build.SIZES.",
+    )
+    parser.add_argument(
+        "--seq-length",
+        type=int,
+        default=8192,
+        help=(
+            "Must be a multiple of 1024. 8192 gives 8 inner steps -- the "
+            "granularity PREREGISTERED.md is scoped to."
+        ),
+    )
+    parser.add_argument(
+        "--stream-tokens",
+        type=int,
+        default=8192,
+        help="Length of each crafted stream, in tokens.",
+    )
+    parser.add_argument(
+        "--corpus-tokens",
+        type=int,
+        default=1 << 17,
+        help="Size of the synthetic span corpus for --random-init.",
+    )
+    parser.add_argument(
         "--fluency-selftest",
         action="store_true",
         help=(
@@ -153,6 +191,133 @@ def _synthetic_result(seeds, strategy):
     )
 
 
+NOT_A_RESULT = (
+    "INSTRUMENT VALIDATION -- RANDOM-INIT VICTIM, NOT A RESULT. "
+    "This model has learned nothing, so it has nothing worth corrupting. "
+    "Every number below is noise on noise. Do not copy this out of results/, "
+    "do not cite it, and do not read its verdict line as a verdict."
+)
+
+
+def _banner_report(report_path: Path, banner: str) -> None:
+    """Prepend a banner so a number lifted out of the file carries its caveat."""
+    existing = report_path.read_text(encoding="utf-8")
+    report_path.write_text(f"> **{banner}**\n\n{existing}", encoding="utf-8")
+
+
+def _random_init_run(args) -> int:
+    """Drive the whole spike against a random-init victim.
+
+    This is the run that makes the real one cheap: afterwards the only missing
+    input is weights. It proves the seams execute against a real vendor
+    `MetaModel` -- which no CPU test can, because the vendor is not importable
+    in CI by design and `tests/test_vendor_bind.py` therefore runs against a
+    fake.
+
+    It proves nothing about the attack. See `NOT_A_RESULT`.
+    """
+    from trustgate.attack.corpus import TokenCorpus
+    from trustgate.attack.objectives import AttackSpec
+    from trustgate.attack.stream import generate_seed_pairs
+    from trustgate.eval import vendor_bind
+    from trustgate.eval.fluency import load_default_scorer
+    from trustgate.eval.harness import (
+        RunCondition,
+        eval_tokens_digest,
+        make_adapt_and_eval,
+        run_attack_spike,
+    )
+    from trustgate.eval.model_build import build_random_init, dummy_tokens
+
+    print(f"[random-init] building a {args.size} victim at seq_length={args.seq_length}")
+    try:
+        cfg, model, state, _mesh = build_random_init(
+            size=args.size, seq_length=args.seq_length
+        )
+    except (ImportError, ValueError) as exc:
+        # `model_build` already explains which case this is -- a missing vendor
+        # tree, an unknown size, or a seq_length the vendor would assert on.
+        # None of them deserves a traceback.
+        raise SystemExit(str(exc)) from exc
+    mini_batch = int(cfg.model.mini_batch_size)
+    binding = vendor_bind.bind(model, state)
+    print(f"[random-init] bound; mini_batch_size={mini_batch}")
+
+    # Span corpus. Ids span a wide range rather than DummyDataset's [0, 20) so
+    # the Llama-3 decode behind the fluency scorer produces varied text instead
+    # of twenty tokens repeated -- perplexity *rewards* repetition, so a
+    # degenerate corpus would make the realism path look like it passes.
+    # BOS is 128000 and is excluded by construction.
+    corpus = TokenCorpus(
+        dummy_tokens(args.corpus_tokens, seed=7, vocab_lo=10, vocab_hi=50_000),
+        name="synthetic",
+    )
+    eval_tokens = dummy_tokens(args.seq_length + 1, seed=2)
+
+    adapt_and_eval = make_adapt_and_eval(binding, eval_tokens, model=model)
+
+    # craft_fn=None means random ordering, which `generate_seed_pairs` documents
+    # as "not a real attack; for testing the orchestration only". That is exactly
+    # what this is. Running the real SELECT hill-climb here would be optimising
+    # against a random-init victim's noise -- expensive and uninformative -- so
+    # `craft.search_order` is the one seam this path deliberately leaves
+    # unexercised. It gets its first real run against trained weights.
+    pairs = generate_seed_pairs(
+        corpus,
+        args.stream_tokens,
+        list(args.seeds),
+        craft_fn=None,
+        mini_batch_size=mini_batch,
+    )
+    arms = dict(zip(args.seeds, pairs))
+
+    try:
+        fluency_scorer = load_default_scorer()
+        print("[random-init] fluency reference loaded")
+    except FileNotFoundError as exc:
+        # Leaves every per-seed ratio nan, which fails the realism bar SAFE.
+        print(f"[random-init] no fluency reference ({exc}); ratios stay nan", file=sys.stderr)
+        fluency_scorer = None
+
+    spec = AttackSpec(
+        objective=Objective(args.objective), stream_tokens=args.stream_tokens
+    )
+    first_poison, _ = arms[args.seeds[0]]
+    condition = RunCondition.from_stream(
+        first_poison,
+        seed=args.seeds[0],
+        seq_length=args.seq_length,
+        checkpoint=f"random-init-{args.size} (NO CHECKPOINT)",
+        benign_eval_split="synthetic",
+        eval_tokens_sha256=eval_tokens_digest(eval_tokens),
+    )
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    result = run_attack_spike(
+        spec,
+        condition,
+        list(args.seeds),
+        out,
+        build_arms=arms.__getitem__,
+        adapt_and_eval=adapt_and_eval,
+        fluency_scorer=fluency_scorer,
+    )
+
+    report_path = write_report(
+        result,
+        out / "report.md",
+        min_effect_size=FROZEN.min_effect_size,
+        min_relative_degradation=FROZEN.min_relative_degradation,
+        max_fluency_ratio=FROZEN.max_fluency_ratio,
+    )
+    _banner_report(report_path, NOT_A_RESULT)
+
+    print(f"\n[random-init] {NOT_A_RESULT}")
+    print(report_path.read_text(encoding="utf-8"))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -181,14 +346,30 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
+    if args.random_init:
+        if args.checkpoint:
+            raise SystemExit(
+                "--random-init and --checkpoint are mutually exclusive: one builds "
+                "a victim with no weights, the other loads weights. Pick one."
+            )
+        if args.strategy != StreamStrategy.SELECT.value:
+            print(
+                f"warning: --strategy {args.strategy} is recorded on the report but "
+                f"the orderings here are random; see the note in _random_init_run.",
+                file=sys.stderr,
+            )
+        return _random_init_run(args)
+
     if not args.dry_run:
         raise SystemExit(
-            "A real run needs a victim model bound to the inner step. The "
-            "carry overlay is implemented (trustgate.eval.carry, ADR-006) but "
-            "`eval_benign` still needs a checkpoint, so there is nothing to "
-            "measure yet. Re-run with --dry-run to exercise the report "
-            "pipeline, or fetch a checkpoint first "
-            "(scripts/fetch_checkpoints.sh)."
+            "A real run needs a victim model bound to the inner step. The carry "
+            "overlay is implemented (trustgate.eval.carry, ADR-006) and "
+            "`vendor_bind` binds it to the real MetaModel, but `eval_benign` "
+            "still needs weights.\n"
+            "  --random-init  builds a weightless victim and exercises every seam "
+            "(instrument validation, renders NO verdict)\n"
+            "  --dry-run      exercises the report pipeline alone, with synthetic "
+            "losses and no model"
         )
 
     result = _synthetic_result(args.seeds, args.strategy)
@@ -205,8 +386,7 @@ def main(argv: list[str] | None = None) -> int:
         "WIRING SMOKE TEST -- SYNTHETIC LOSSES, NOT A RESULT. "
         "Do not copy this out of results/ and do not cite it."
     )
-    existing = report_path.read_text(encoding="utf-8")
-    report_path.write_text(f"> **{banner}**\n\n{existing}", encoding="utf-8")
+    _banner_report(report_path, banner)
 
     print(f"[dry run] {banner}")
     print(report_path.read_text(encoding="utf-8"))
