@@ -302,6 +302,52 @@ moment.
 | 2026-08-08 | Initial. All figures estimated; nothing probed, rented or spent. | — |
 | 2026-09-14 | §1 requester-pays verified anonymously at zero cost, all three buckets. | Settled a standing assumption without auth or spend. |
 | 2026-09-14 | Added §9 (access routes). No cap, bar or estimate above it changed. | The first GCP billing signup was denied; the routes needed recording where the next person looks. |
+| **2026-09-16** | **§2.2/§3 superseded by the probe: `/val` is 2.0B tokens, not 50M–1B. The eval is now truncated, not full.** See §8.1. | §6.1's own instruction: *"re-plan before renting; this is knowable for free, today."* The probe landed 2026-09-14; this is the re-plan. |
+| 2026-09-16 | §9.4 corrected: the eval batch is **8**, not 1, so its memory estimate was low. Recommendation moves from "40 GB may be enough" to **80 GB**. See §9.4. | `train.py:211` floors the eval batch independently of `global_batch_size`. |
+
+### 8.1 The `/val` re-plan, 2026-09-16
+
+The 2026-09-14 probe (`results/gcs-probe-20260914T164647Z.txt`) measured `/val` at
+**2,000,168,321 tokens — 8.4 GB, uint32, uncompressed**. It flagged itself `OUT_OF_BAND`
+against §2.2's assumed 50M–1B. §6 ranked this the **#1** thing that would blow up the model,
+and it did.
+
+**What it costs.** §3's table, at the 1B interpolated rate, puts one pass at **≈7.5
+GPU-hours**. §5's bar S2 requires the identical command run twice. A full-`/val` baseline is a
+~15-hour job that collides with the 12-GPU-hour stop rule and does not fit any single booking.
+
+**What changes.** §3's claim that "the eval pass cannot be shortened by configuration" stands
+— there is no `num_eval_batches` and `repeat=False`. But the batch count is not configuration
+at all:
+
+```python
+ttt/dataloader/lm_dataset.py:27
+def __len__(self):
+    return (self.split.shape[0] - 1) // self.seq_len
+```
+
+It is read off the zarr array's declared **shape**. Copying K chunks and rewriting `shape` in
+the **local** `val/zarr.json` bounds the pass exactly. This touches our data copy, never the
+vendor tree, so ADR-002 is not in play. Implemented in `scripts/make_val_subset.py`, tested in
+`tests/test_val_subset.py`, and recorded per run in `val-subset-manifest.json`.
+
+**The trap it guards.** Absent zarr chunks read as the **fill value** (0 here) rather than
+raising, so a shape exceeding the chunks on disk evaluates the model on padding and returns a
+confident, meaningless loss with no error. `reshape` refuses that by default. Nothing else in
+the stack would catch it.
+
+**Revised figures for the 1B baseline at 150M tokens (7.5% of `/val`):**
+
+| | Full `/val` | 150M subset |
+|---|---|---|
+| Eval pass, 1B @8K | ≈7.5 GPU-h | ≈0.6 GPU-h (H100) |
+| Two passes for bar S2 | ≈15 GPU-h | ≈1.2 GPU-h |
+| `/val` egress | 8.4 GB | 0.6 GB |
+| Total session egress (+ 1B ckpt at 5.35 GB) | ≈13.7 GB ≈ $1.65 | ≈6.0 GB ≈ $0.72 |
+
+**No cap moves.** §7 stands at its figures. The bar does not move either — `TOLERANCE.md` §8
+records, dated and before the run, why §4.1's band still applies to a subset and what the
+subset costs in interpretation.
 
 ---
 
@@ -380,6 +426,11 @@ mitigates this; community hosts do not. The saving does not pay for the exposure
 
 ### 9.4 A 40GB card may be enough — verify before booking 80GB
 
+> **Corrected 2026-09-16 — read §9.4.1 below before acting on this section.** The estimate
+> here assumes the eval runs at `global_batch_size=1`. It does not: `train.py:211` floors the
+> eval batch at 8 independently of `global_batch_size`, and two of the largest terms scale
+> with it. The recommendation is now **80 GB**.
+
 §7's assumption 1 and §5 both presume an 80 GB card. That figure is the vendor's
 **training** footprint at the vendor's batch sizes. At the settings this project
 actually runs — `global_batch_size=1`, `seq_length=8192`, `mini_batch_size=1024` —
@@ -395,6 +446,46 @@ published rows) puts 1B at roughly:
 A100 40GB at ₹84/hr covers both T1.6 and T1.10 and roughly halves the compute
 line. Confirm it on the box with one memory reading before booking anything
 larger — and if it is wrong, say so here rather than quietly renting up.
+
+### 9.4.1 Correction, 2026-09-16 — the eval batch is 8, and 40 GB is not enough
+
+§9.4 reasons from "the settings this project actually runs — `global_batch_size=1`". The eval
+does not run at that batch. `Evaluator` is constructed with
+
+```python
+ttt/train.py:211
+global_batch_size=max(cfg.training.eval_batch_size,          # default 8 (config.py:170)
+                      cfg.training.global_batch_size // cfg.training.accum_steps * 4)
+```
+
+so with `global_batch_size` at 1 **or** 2 the eval batch is **8** either way. Two of the
+largest terms are per-batch-element, and §9.4 counted them once.
+
+| Term | Size at eval batch 8 | Source |
+|---|---|---|
+| Params, fp32 | 5.9 GB | §2.1 |
+| **Outer AdamW state** | **11.7 GB** | `train.py:180`. With `load_part="params"` (forced by `train.py:158` in eval mode) `opt_state` is absent from the restore, so it is built from scratch — and then never used, because the eval branch returns at `:223` |
+| Dtype-cast model copy | 0–5.9 GB | `transformer.py:685` at `state_dtype=fp32`; XLA may elide it |
+| Adapted fast weights, **×8** | 5.1 GB | 160.4M × 4 B × 8, vmapped at `loop.py:29` |
+| Per-chunk logits + fp32 log-softmax, **×8** | ~10.5 GB | `[8, 1024, 128256]`; `loss.py:18` casts to fp32 *before* `log_softmax` |
+| Prefix output + embeddings | ~1.1 GB | `[8, 8192, 2048]` |
+| Remat'd chunk activations | 2–4 GB | bounded by `scan_remat_chunk` + `eqx.filter_checkpoint` |
+| **Total** | **≈ 36–49 GB** | |
+
+**This is still an estimate and still has never run.** But it straddles 40 GB, where §9.4's
+figure sat comfortably below it. At JarvisLabs rates the 40 GB → 80 GB step is ₹57/hour —
+about ₹230 on a four-hour booking — against the risk of an OOM an hour in, on a card that
+cannot be resized without re-provisioning.
+
+**Recommendation: rent 80 GB, and measure.** §9.4 asked for a memory reading before renting
+larger; the honest order is the reverse. Take the reading on a card that will not OOM, then
+downsize the *next* booking on evidence. Record the peak
+(`nvidia-smi --query-gpu=memory.used --format=csv`) in the booking Outcome and amend this
+section with the measurement.
+
+**If it does OOM**, the lever is the eval batch, and it needs *both* overrides because of the
+`max()`: `training.global_batch_size=1 training.eval_batch_size=4` gives batch 4, halving the
+two ×8 terms. Record it — it changes the run condition, though not the quantity estimated.
 
 ### 9.5 IndiaAI Mission — the structurally right route, on a slow clock
 

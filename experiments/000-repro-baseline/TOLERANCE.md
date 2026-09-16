@@ -295,3 +295,41 @@ with the reason, and leaves the superseded value visible.
 | Date | Change | Reason |
 |---|---|---|
 | 2026-08-08 | Initial pre-registration. Nothing observed. | — |
+| 2026-09-16 | **No bar moved.** Scope note: the first 1B baseline will be measured over a *truncated* `/val`. See below. | The 2026-09-14 probe put `/val` at 2.0B tokens; a full pass is ~7.5 GPU-h and bar S2 wants two of them. |
+
+### 2026-09-16 — measuring the baseline over a subset of `/val`
+
+**Written before the run, before any number exists.** That timing is the whole point; written
+afterwards this would read as an excuse.
+
+The 2026-09-14 GCS probe measured `/val` at **2,000,168,321 tokens** (8.4 GB, uint32,
+uncompressed), against `COST_MODEL.md` §2.2's assumed 50M–1B band. At §3's interpolated 1B
+rate one pass is ≈7.5 GPU-hours, and §5's bar **S2 requires the identical command run twice**.
+A full-`/val` baseline is therefore a ~15-hour job and does not fit a booking.
+
+**Decision: the first baseline is measured over a truncated local copy of `/val`**, built and
+recorded by `scripts/make_val_subset.py`. The token count is chosen on the box from measured
+throughput so that two passes fit the session; the default is 150M tokens (≈7.5% of `/val`,
+18,310 sequences at `seq_length=8192`).
+
+**Why §4.1's band still applies, unchanged.** The bar is on `train_holdout/loss`, a **mean
+cross-entropy per token**. A contiguous subset estimates the same population quantity as the
+full split; it does not change what is being measured, only the precision with which it is
+estimated. At 18,310 sequences the sampling error on a mean CE is far below the band's 0.49
+nat width. The band is not narrowed, widened or moved.
+
+**What it does cost.** Two honest caveats, recorded now rather than discovered later:
+
+- `/val` is read **in order** (`shuffle=False`), so a subset is the *first* N tokens, not a
+  random sample. If the split is ordered by document or by source, the subset is not
+  exchangeable with the whole. Unknown and unknowable without reading more of it — which is
+  precisely the cost being avoided. A later full pass would settle it.
+- §4.3's non-binding 2.60–2.70 expectation was derived for the full split. Treat a miss there
+  as even weaker evidence than it already was.
+
+**The record travels with the number.** `val-subset-manifest.json` — original shape, truncated
+shape, chunk digests, sequence count — is copied into `results/` beside the loss. A truncated
+baseline that cannot name the tokens it was computed over is not a result.
+
+**This is not a Rule 5 revision.** No bar moved. It is a scope note about what was measured,
+which Rule 5 requires be written *before* the run rather than after.

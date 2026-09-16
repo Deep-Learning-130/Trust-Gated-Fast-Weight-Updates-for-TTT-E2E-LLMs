@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Cold-start a fresh GPU box: nothing -> ready to run the baseline eval.
 #
+#   uv and the gcloud SDK installed if the image lacks them (JarvisLabs images do)
 #   vendor submodule at the pinned SHA
 #   vendor environment installed (its own uv.lock)
 #   `import ttt` succeeds
 #   1B checkpoint on local disk, sha256 recorded
-#   books3 /val on local disk (the loader cannot read gs://)
+#   a TRUNCATED books3 /val on local disk, with a manifest recording what was cut
 #   training.exp_dir created OUTSIDE this repo
-#   a ready-to-paste eval command written out, with every path filled in
+#   three ready-to-paste commands written out -- smoke, baseline, negative control
+#   a shared XLA compilation cache, so the smoke pass pays the compile once
 #   everything above logged to a file
 #
 # ---------------------------------------------------------------------------
@@ -23,10 +25,18 @@
 #   bash scripts/bootstrap_gpu_box.sh
 #
 # Useful overrides:
-#   CKPT=125m_ttt_e2e_finetune_books_8k_1x_cc   # the cheap rehearsal (do this first)
-#   DATA_ROOT=/mnt/data  EXP_DIR=/mnt/runs
+#   VAL_TOKENS=150000000                        # eval length; THE wall-clock knob
+#   SMOKE_TOKENS=131073                         # 16 sequences = 2 eval batches
+#   CKPT=125m_ttt_e2e_finetune_books_8k_1x_cc   # +experiment= follows this automatically
+#   DATA_ROOT=/mnt/data  EXP_DIR=/mnt/runs      # point these at persistent storage
 #   SKIP_DATA=1                                 # checkpoint only
+#   AUTO_INSTALL=0                              # refuse rather than install uv/gcloud
 #   ALLOW_SHA_DRIFT=1                           # accept a vendor SHA != the pin
+#
+# On /val size: the 2026-09-14 probe measured it at 2,000,168,321 tokens (8.4 GB).
+# A full pass is ~7.5 GPU-hours at the 1B rate and TOLERANCE.md s5 bar S2 wants two
+# of them. VAL_TOKENS is how that fits a booking; scripts/make_val_subset.py records
+# what was cut. Resize later with `make_val_subset.py reshape` -- it transfers nothing.
 set -euo pipefail
 
 CKPT="${CKPT:-1b_ttt_e2e_finetune_books_8k_1x_cc}"
@@ -92,10 +102,42 @@ say "Step 0 — preflight"
 : "${WANDB_PROJECT:?Set WANDB_PROJECT}"
 : "${WANDB_KEY:?Set WANDB_KEY -- a real key. This is procurement (P0-10), not configuration}"
 
-missing=()
-for t in git uv gsutil; do command -v "$t" >/dev/null 2>&1 || missing+=("$t"); done
-[[ ${#missing[@]} -eq 0 ]] || die "missing tools: ${missing[*]}"
-echo "    tools     : git uv gsutil present"
+# A JarvisLabs (or any non-GCP) image ships neither `uv` nor the gcloud SDK, and
+# both are one command away. Dying here used to mean the box billed while someone
+# read a README. AUTO_INSTALL=0 restores the old refuse-and-exit behaviour.
+AUTO_INSTALL="${AUTO_INSTALL:-1}"
+
+ensure_tool() {  # name, human-readable installer description, installer command
+  local tool="$1" what="$2" installer="$3"
+  if command -v "$tool" >/dev/null 2>&1; then
+    echo "    tools     : $tool present"
+    return 0
+  fi
+  if [[ "$AUTO_INSTALL" != "1" ]]; then
+    die "$tool not found and AUTO_INSTALL=0. Install $what and re-run."
+  fi
+  echo "    tools     : $tool missing -- installing $what"
+  eval "$installer" || die "failed to install $tool. Install it by hand and re-run."
+  command -v "$tool" >/dev/null 2>&1 || die "$tool still not on PATH after install.
+       Open a new shell (or re-source your profile) and re-run; this script is idempotent."
+  echo "    tools     : $tool installed"
+}
+
+command -v git >/dev/null 2>&1 || die "git not found -- this is a git checkout, so something is very wrong"
+echo "    tools     : git present"
+
+ensure_tool uv "astral.sh/uv"   'curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"'
+
+ensure_tool gsutil "the Google Cloud SDK"   'curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts && export PATH="$HOME/google-cloud-sdk/bin:$PATH"'
+
+# gsutil exists but is useless without credentials, and the failure otherwise
+# lands mid-transfer rather than here.
+if ! gcloud auth list --filter=status:ACTIVE --format="value(account)" 2>/dev/null | grep -q .; then
+  die "gcloud has no active account. Run:  gcloud auth login
+       Both buckets are requester-pays; nothing downstream can start without it.
+       This is procurement (T1.3), not configuration -- it is not fixable on a billing clock."
+fi
+echo "    gcloud    : $(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)"
 
 if command -v nvidia-smi >/dev/null 2>&1; then
   nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader \
@@ -163,36 +205,25 @@ fi
 # _make_train_iterator (train.py:125) opens the train array before the eval
 # branch returns; with zarr v3 its absent chunks read as fill value, so no /train
 # chunk data is needed. See COST_MODEL.md s1.1.
-say "Step 5 — dataset (books3 /val -> local disk)"
+say "Step 5 — dataset (books3 /val subset -> local disk)"
+# The 2026-09-14 probe measured /val at 2,000,168,321 tokens / 8.4 GB. A full
+# pass is ~7.5 GPU-hours at the 1B rate, and TOLERANCE.md s5 bar S2 wants the
+# identical command run twice. So we take a subset and record exactly what was
+# taken: scripts/make_val_subset.py, which also copies /train's metadata
+# (COST_MODEL s1.1 -- without it the run dies after billing starts).
+#
+# VAL_TOKENS is the one knob that sets eval wall-clock. It can be changed later
+# with `reshape`, which transfers nothing.
+VAL_TOKENS="${VAL_TOKENS:-150000000}"
+SMOKE_TOKENS="${SMOKE_TOKENS:-131073}"   # 16 sequences = exactly 2 eval batches
+
 if [[ "${SKIP_DATA:-0}" == "1" ]]; then
   echo "    SKIP_DATA=1 -- skipping. The eval will fail without it."
-elif [[ -d "$BOOKS3_LOCAL/val" ]] && [[ -f "$BOOKS3_LOCAL/train/zarr.json" ]]; then
-  skip "books3 /val present at $BOOKS3_LOCAL"
 else
-  mkdir -p "$BOOKS3_LOCAL/train"
-  g() { gsutil -u "$GCP_BILLING_PROJECT" "$@"; }
-
-  echo "    probing $DATA_BUCKET/val (metadata only, no transfer)"
-  if val_du="$(g du -s "$DATA_BUCKET/val" 2>&1)"; then
-    echo "    /val bytes: $val_du"
-    printf '%s\n' "$val_du" > "$EXP_DIR/bootstrap/books3-val-size.txt"
-  else
-    echo "    WARNING: could not probe /val. Layout may differ from the assumption."
-    echo "$val_du"
-  fi
-
-  # Group metadata. zarr v3 puts zarr.json at the store root; v2 uses .zgroup.
-  g cp "$DATA_BUCKET/zarr.json" "$BOOKS3_LOCAL/" 2>/dev/null \
-    || g cp "$DATA_BUCKET/.zgroup" "$BOOKS3_LOCAL/" 2>/dev/null \
-    || echo "    note: no root group metadata found (may be a bare array store)"
-
-  # /train metadata only -- deliberately no chunks.
-  g cp "$DATA_BUCKET/train/zarr.json" "$BOOKS3_LOCAL/train/" 2>/dev/null \
-    || g cp "$DATA_BUCKET/train/.zarray" "$BOOKS3_LOCAL/train/" 2>/dev/null \
-    || echo "    note: no /train metadata found -- if the eval crashes opening /train, this is why"
-
-  echo "    copying /val (this is the transfer)"
-  g -m cp -r "$DATA_BUCKET/val" "$BOOKS3_LOCAL/"
+  # Plain python3, not the vendor env: make_val_subset.py imports nothing outside
+  # the standard library, precisely so it runs before `uv sync` has finished.
+  export GCP_BILLING_PROJECT
+  python3 "$repo_root/scripts/make_val_subset.py"     --dest "$BOOKS3_LOCAL" fetch --tokens "$VAL_TOKENS"
 fi
 
 if [[ -d "$BOOKS3_LOCAL" ]]; then
@@ -224,61 +255,146 @@ ENVREC="$EXP_DIR/bootstrap/env-record.txt"
 } > "$ENVREC"
 cat "$ENVREC" | sed 's/^/    /'
 
-# --------------------------------------------------- 8. the eval command -----
-# Written to a file rather than only printed, so the first session runs a
-# reviewed command instead of one retyped at 2am.
-say "Step 8 — writing the eval command"
-CMD="$EXP_DIR/bootstrap/eval-command-${CKPT}.sh"
-cat > "$CMD" <<EOF
+# --------------------------------------------------- 8. the eval commands ----
+# Written to files rather than only printed, so the first session runs reviewed
+# commands instead of ones retyped at 2am. Three of them, because the session
+# needs three and "edit this one to make the others" is how bookings get lost.
+say "Step 8 — writing the eval commands"
+
+# +experiment follows the checkpoint. It used to be hardcoded to 1B with a note
+# telling the reader to edit it; that note was a defect, not documentation.
+SIZE="${CKPT%%_*}"
+case "$SIZE" in
+  125m|350m|760m|1b|3b) EXPERIMENT="${SIZE}/extension/ext-${SIZE}-e2e-32K" ;;
+  *) die "cannot derive +experiment from CKPT='$CKPT' (size prefix '$SIZE').
+       Known sizes: 125m 350m 760m 1b 3b. Set EXPERIMENT= by hand if this is deliberate." ;;
+esac
+EXPERIMENT="${EXPERIMENT_OVERRIDE:-$EXPERIMENT}"
+echo "    checkpoint: $CKPT"
+echo "    experiment: $EXPERIMENT"
+
+# One XLA cache, shared by every command below. Batch size and sequence length
+# are identical across them -- only the number of batches differs, which is a
+# Python-level loop count -- so the smoke pass compiles the 24-layer scan once
+# and the real runs start hot. This is worth 20-60 minutes of a 4-hour booking.
+CACHE_DIR="$EXP_DIR/jax-cache"
+mkdir -p "$CACHE_DIR"
+echo "    xla cache : $CACHE_DIR"
+
+write_eval_cmd() {  # path, exp_name, extra hydra overrides..., preceded by a header comment
+  local path="$1" exp_name="$2" header="$3"; shift 3
+  cat > "$path" <<EOF
 #!/usr/bin/env bash
-# Baseline eval for $CKPT -- generated $(date -u +%Y-%m-%dT%H:%M:%SZ) by bootstrap_gpu_box.sh.
+# $header
+# Generated $(date -u +%Y-%m-%dT%H:%M:%SZ) by bootstrap_gpu_box.sh. NEVER EXECUTED before this session.
+#
 # Derivation and citations: experiments/000-repro-baseline/EVAL_ENTRYPOINT.md
 # Decision record:          docs/adr/ADR-004-baseline-eval-invocation.md
 # Pre-registered bar:       experiments/000-repro-baseline/TOLERANCE.md
 #
-# The gate must NOT be installed for this run: is_installed() == False throughout.
+# The gate must NOT be installed for this run: is_installed() == False throughout,
+# and no trustgate import appears anywhere in it (T1.6).
 set -euo pipefail
+
+export JAX_COMPILATION_CACHE_DIR="$CACHE_DIR"
+export JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS=1
+
 cd "$repo_root/vendor/ttt-e2e"
 
-uv run --exact train \\
-  +deploy=interactive \\
-  +experiment=1b/extension/ext-1b-e2e-32K \\
-  training.eval_mode=true \\
-  training.seq_length=8192 \\
-  training.global_batch_size=2 \\
-  training.exp_name=eval-${CKPT} \\
-  training.load_part=params \\
-  checkpoint.resume_checkpoint_dir=$CKPT_DEST \\
-  deploy_paths.data.books3=$BOOKS3_LOCAL \\
-  training.exp_dir=$EXP_DIR \\
-  training.wandb_entity=$WANDB_ENTITY \\
-  training.wandb_project=$WANDB_PROJECT \\
-  training.wandb_key=\$WANDB_KEY
+uv run --exact train \
+  +deploy=interactive \
+  +experiment=$EXPERIMENT \
+  training.eval_mode=true \
+  training.seq_length=8192 \
+  training.global_batch_size=2 \
+  training.exp_name=$exp_name \
+  training.load_part=params \
+  checkpoint.resume_checkpoint_dir=$CKPT_DEST \
+  deploy_paths.data.books3=$BOOKS3_LOCAL \
+  training.exp_dir=$EXP_DIR \
+  training.wandb_entity=$WANDB_ENTITY \
+  training.wandb_project=$WANDB_PROJECT \
+  training.wandb_key=\$WANDB_KEY $*
 
 # Result: "Eval -- train_holdout/loss: <value>"  (mean CE, nats/token)
-# Per-token curve: $EXP_DIR/demo/eval-${CKPT}/train_holdout_token_nll_loss.npy
+# Per-token curve: $EXP_DIR/demo/$exp_name/train_holdout_token_nll_loss.npy
 EOF
-chmod +x "$CMD"
-echo "    $CMD"
-echo
-echo "    NOTE: --experiment is hardcoded to the 1B config. For the 125M or 3B"
-echo "          checkpoints, edit +experiment= and training.seq_length to match."
+  chmod +x "$path"
+  echo "    $path"
+}
+
+SMOKE_CMD="$EXP_DIR/bootstrap/1-smoke-${CKPT}.sh"
+REAL_CMD="$EXP_DIR/bootstrap/2-eval-${CKPT}.sh"
+CTRL_CMD="$EXP_DIR/bootstrap/3-dummy-control-${CKPT}.sh"
+
+write_eval_cmd "$SMOKE_CMD" "smoke-${CKPT}" \
+  "SMOKE PASS -- two eval batches. Shakes out the launch and warms the XLA cache. NOT a result."
+write_eval_cmd "$REAL_CMD" "eval-${CKPT}" \
+  "BASELINE EVAL for $CKPT. Run it TWICE unchanged -- TOLERANCE.md s5 bar S2 wants 4-decimal agreement."
+write_eval_cmd "$CTRL_CMD" "dummy-${CKPT}" \
+  "NEGATIVE CONTROL (TOLERANCE.md s5 bar S3). Random tokens; the loss must land FAR ABOVE the band." \
+  "training.dummy_dataset=true"
+
+# The subset commands sit beside them, because the smoke-to-real transition is a
+# reshape and nothing else -- no refetch, no cache invalidation.
+RESHAPE_SMOKE="$EXP_DIR/bootstrap/reshape-to-smoke.sh"
+RESHAPE_REAL="$EXP_DIR/bootstrap/reshape-to-real.sh"
+cat > "$RESHAPE_SMOKE" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+python3 "$repo_root/scripts/make_val_subset.py" --dest "$BOOKS3_LOCAL" reshape --tokens $SMOKE_TOKENS
+EOF
+cat > "$RESHAPE_REAL" <<EOF
+#!/usr/bin/env bash
+# Resize the eval without refetching. Measure tokens/sec on the smoke pass first,
+# then set --tokens so that TWO passes fit the time left in the booking.
+set -euo pipefail
+python3 "$repo_root/scripts/make_val_subset.py" --dest "$BOOKS3_LOCAL" reshape --tokens "\${1:-$VAL_TOKENS}"
+EOF
+chmod +x "$RESHAPE_SMOKE" "$RESHAPE_REAL"
+echo "    $RESHAPE_SMOKE"
+echo "    $RESHAPE_REAL"
 
 # ------------------------------------------------------------------- done ----
 say "Bootstrap complete"
 cat <<EOF
 
-  Next, in order:
+  Runbook: docs/protocols/gpu-session-1-runbook.md -- read it, it is one page.
 
-  1. Read $CMD before running it. It has never been executed.
-  2. Run it. Expect the first launch to fail; the four known ways are in
-     COST_MODEL.md s4 (W&B, eval batch size, exp_dir, the zarr /train layout).
-  3. Copy results out -- results/ and *.npy are BOTH git-ignored, so a run that
-     is not deliberately transcribed leaves no record:
-       cp $EXP_DIR/demo/eval-${CKPT}/train_holdout_token_nll_loss.npy \\
+  In order:
+
+  1. Shrink to the smoke size, then run the smoke pass. It has never executed;
+     expect it to fail. The four known ways are in COST_MODEL.md s4 (W&B, eval
+     batch size, exp_dir, the zarr /train layout).
+       bash $RESHAPE_SMOKE
+       bash $SMOKE_CMD
+
+  2. Note tokens/sec from the smoke pass. Size the real run so TWO passes fit
+     the time you have left, then reshape:
+       bash $RESHAPE_REAL <tokens>
+
+  3. Run the baseline TWICE, unchanged (bar S2 wants 4-decimal agreement):
+       bash $REAL_CMD && bash $REAL_CMD
+
+  4. Negative control (bar S3):
+       bash $CTRL_CMD
+
+  5. Copy results out. results/, *.npy and wandb/ are ALL git-ignored, so a run
+     that is not deliberately transcribed leaves no record:
+       cp $EXP_DIR/demo/eval-${CKPT}/train_holdout_token_nll_loss.npy \
           $repo_root/experiments/000-repro-baseline/results/
-  4. Compare against experiments/000-repro-baseline/TOLERANCE.md. Read the bar
+       cp $BOOKS3_LOCAL/val-subset-manifest.json \
+          $repo_root/experiments/000-repro-baseline/results/
+       cp $ENVREC $repo_root/experiments/000-repro-baseline/results/
+
+     The manifest is not optional: it is what lets the number name the tokens it
+     was computed over.
+
+  6. Compare against experiments/000-repro-baseline/TOLERANCE.md. Read the bar
      BEFORE reading the number -- it is pre-registered for a reason (Rule 5).
+
+  7. Fill in the Outcome column in docs/protocols/gpu-bookings.md. The box is not
+     free until that is done.
 
   Log: $LOG
 EOF
