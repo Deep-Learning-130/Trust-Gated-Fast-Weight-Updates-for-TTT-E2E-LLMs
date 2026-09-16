@@ -135,63 +135,15 @@ mkdir -p "$DEST"
 gsutil -u "$GCP_BILLING_PROJECT" -m cp -n -r "$SRC/*" "$DEST/"
 
 # ---------------------------------------------------------- fingerprint -----
-# A checkpoint is a directory of many files, so one hash is not enough: record a
-# sorted per-file manifest, then a single hash OF that manifest as the value to
-# quote. Satisfies TEAM_PLAN P0-5.
-echo "==> Fingerprinting $DEST"
-
-if command -v sha256sum >/dev/null 2>&1; then
-  sha256() { sha256sum "$@"; }
-elif command -v shasum >/dev/null 2>&1; then
-  sha256() { shasum -a 256 "$@"; }
-else
-  echo "ERROR: no sha256sum or shasum available; cannot fingerprint." >&2
-  exit 1
-fi
-
-MANIFEST="$RESULTS/checkpoint-sha256-${CKPT}.txt"
-TMP="$(mktemp)"
-trap 'rm -f "$TMP"' EXIT
-
-# LC_ALL=C so the sort order is byte order and the manifest hash is portable.
-# A read loop rather than `xargs -d` / `find -printf`, both of which are GNU-only
-# -- this has to run unchanged on whatever box we end up renting.
-( cd "$DEST" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do
-    sha256 "$f"
-  done ) > "$TMP"
-
-LOCAL_BYTES="$( cd "$DEST" && find . -type f -exec cat {} + | wc -c | tr -d ' ' )"
-FILE_COUNT="$(grep -c . "$TMP" || true)"
-MANIFEST_SHA="$(sha256 < "$TMP" | awk '{print $1}')"
-
-{
-  echo "# Checkpoint fingerprint -- TEAM_PLAN P0-5"
-  echo "# checkpoint:      $CKPT"
-  echo "# source:          $SRC"
-  echo "# dest:            $DEST"
-  echo "# remote_bytes:    $BYTES"
-  echo "# local_bytes:     $LOCAL_BYTES"
-  echo "# files:           $FILE_COUNT"
-  echo "# manifest_sha256: $MANIFEST_SHA   <-- quote THIS as the checkpoint hash"
-  echo "# vendor_sha:      $(git -C vendor/ttt-e2e rev-parse HEAD 2>/dev/null || echo 'submodule not initialised')"
-  echo "# fetched_utc:     $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "# fetched_by:      ${USER:-unknown}@$(hostname)"
-  echo "#"
-  echo "# Per-file sha256, paths relative to $DEST, sorted (LC_ALL=C):"
-  cat "$TMP"
-} > "$MANIFEST"
-
-if [[ "$LOCAL_BYTES" != "$BYTES" ]]; then
-  echo "WARNING: local bytes ($LOCAL_BYTES) != remote bytes ($BYTES)."
-  echo "         The transfer may be incomplete. Re-run this script -- 'cp -n' will"
-  echo "         fetch only what is missing."
-fi
+# A checkpoint is a directory of many files, so one hash is not enough: a sorted
+# per-file manifest plus a hash OF that manifest (TEAM_PLAN P0-5). The logic lives
+# in fingerprint_checkpoint.sh so a side-loaded checkpoint gets the same record.
+DEST="$DEST" CKPT="$CKPT" RESULTS="$RESULTS" SOURCE="$SRC" REMOTE_BYTES="$BYTES" \
+  bash "$repo_root/scripts/fingerprint_checkpoint.sh"
 
 echo
 echo "==> Done."
 echo "    checkpoint:      $DEST"
-echo "    manifest:        $MANIFEST   (git-ignored -- transcribe the hash into a tracked file)"
-echo "    manifest_sha256: $MANIFEST_SHA"
 echo
 echo "    NOTE: $RESULTS/ is git-ignored. Copy the hash above into the tracked"
 echo "          experiment record, or this run leaves no evidence."

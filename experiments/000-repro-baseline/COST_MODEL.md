@@ -304,6 +304,7 @@ moment.
 | 2026-09-14 | Added §9 (access routes). No cap, bar or estimate above it changed. | The first GCP billing signup was denied; the routes needed recording where the next person looks. |
 | **2026-09-16** | **§2.2/§3 superseded by the probe: `/val` is 2.0B tokens, not 50M–1B. The eval is now truncated, not full.** See §8.1. | §6.1's own instruction: *"re-plan before renting; this is knowable for free, today."* The probe landed 2026-09-14; this is the re-plan. |
 | 2026-09-16 | §9.4 corrected: the eval batch is **8**, not 1, so its memory estimate was low. Recommendation moves from "40 GB may be enough" to **80 GB**. See §9.4. | `train.py:211` floors the eval batch independently of `global_batch_size`. |
+| 2026-09-16 | §9.3 corrected: Jarvislabs is card-only and unusable; provider is **E2E Networks**. No cap or estimate changed. | Payment is UPI-only (§9.1). |
 
 ### 8.1 The `/val` re-plan, 2026-09-16
 
@@ -401,6 +402,12 @@ So the checkpoint is reachable only through a GCP billing account. Every route i
 §9.1 is about obtaining one.
 
 ### 9.3 Compute routes, priced
+
+> **Corrected 2026-09-16.** The sentence below that "Indian providers bill in INR via UPI/NEFT"
+> is wrong for **Jarvislabs**, which takes Stripe card payments only. Cards are not an available
+> rail for this project (§9.1), so Jarvislabs is **unusable** despite the lowest rates. The provider
+> for session 1 is **E2E Networks** (UPI, net banking, NEFT; per-minute billing). The table is kept
+> as recorded. `docs/protocols/gpu-session-1-runbook.md` §1 has the rental spec.
 
 §7's assumption 1 budgets **$2–4/GPU-hour**. That band was written for US
 on-demand H100/A100 and is now the pessimistic end. Indian providers bill in INR

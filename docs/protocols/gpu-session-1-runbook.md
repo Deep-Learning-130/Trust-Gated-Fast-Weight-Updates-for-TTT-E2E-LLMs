@@ -1,215 +1,170 @@
-# GPU session 1 — runbook
+# GPU session 1: runbook
 
-> **One page, in order.** Everything here is also in `gpu-queue.md`, `COST_MODEL.md` §4/§6/§9,
-> `TOLERANCE.md` §5, `EVAL_ENTRYPOINT.md` §5 and `task-allocation.md` T1.4–T1.7. It is repeated
-> rather than referenced because on a billing clock you should be reading one file.
->
-> Written 2026-09-16, before the first booking. Target: **the 1B Books @8K baseline, in one
-> 3–4 hour session.** Tasks `P0-1` / `T1.4`, `T1.5`, `T1.6`, `T1.7`.
+> **One page, in order.** Written 2026-09-16 before the first booking, and revised the same
+> day after the scripts were rehearsed end to end on a fake box.
+> Target: **the 1B Books @8K baseline in one session on E2E Networks.** Tasks `P0-1` / `T1.4`–`T1.7`.
+> Supporting detail: `COST_MODEL.md` §4/§9, `TOLERANCE.md` §4–§5, `EVAL_ENTRYPOINT.md`.
 
 ---
 
-## 0. Before you rent — none of this is fixable on the clock
+## 0. Before you rent: none of this can be fixed while the box bills
 
-| | Item | Where it comes from |
+| | Item | How to prove it |
 |---|---|---|
-| ☐ | **W&B entity, project and API key**, proven with `wandb login` | T1.2 / P0-10. Mandatory: the vendor login runs *before* the eval branch and `training.log_wandb=false` does not avoid it (ADR-004 §3) |
-| ☐ | **`gcloud` authenticated** against a billing project | Both buckets are requester-pays. COST_MODEL §9.1 — this is the blocker that has stopped every previous attempt |
-| ☐ | Image verified **CUDA 12.8 / cuDNN 9.8** | COST_MODEL §6.2. A mismatch eats days |
-| ☐ | Byte counts re-probed: `GCP_BILLING_PROJECT=… PROBE_ONLY=1 bash scripts/fetch_checkpoints.sh` | Free, metadata only |
-| ☐ | **`TOLERANCE.md` read** — the bar, before any number exists | Standing Rule 5 |
-| ☐ | **Booking row claimed** in `gpu-bookings.md` | The record is the lock. Claim it *before* the instance starts |
+| ☐ | **Checkpoint and val subset are on a disk you control** | See §0.1. This is the blocker. Without these files a booking produces nothing |
+| ☐ | **W&B credentials work the way the vendor uses them** | `WANDB_ENTITY=… WANDB_PROJECT=… WANDB_KEY=… uv run --no-project --with wandb==0.19.9 python scripts/preflight_wandb.py` exits 0 |
+| ☐ | **This branch is pushed** | The box clones it. `git log origin/infra/gpu-session-1 -1` shows the commit you mean to run |
+| ☐ | **`TOLERANCE.md` §4.1 and §5 read.** You know the bar before any number exists | Standing Rule 5 |
+| ☐ | **Booking row claimed** in `gpu-bookings.md` | The record is the lock |
 
-A booking with no task ID, no owner or no estimate is not a booking.
+### 0.1 The data, and why there is no Google Cloud step
 
----
+The 1B checkpoint (`1b_ttt_e2e_finetune_books_8k_1x_cc`, 5.35 GB) and books3 `/val` exist **only**
+in requester-pays GCS buckets, and there is no mirror (COST_MODEL §9.2). **No Google Cloud
+account is used in this plan.** Someone who has access has to hand the files over. Anyone
+with a GCP billing project can run `fetch_checkpoints.sh` and `make_val_subset.py fetch
+--tokens 200000000` on their own machine. Either way, you need two directories:
 
-## 1. What to rent
-
-**An 80 GB card. Not 40 GB.**
-
-COST_MODEL §9.4 estimated 1B at ≈25 GB via unmodified `train.py` and suggested a 40 GB card
-might do. That estimate assumed `global_batch_size=1`. It is wrong about the batch: the
-Evaluator floors the eval batch independently of `global_batch_size`,
-
-```python
-ttt/train.py:211
-global_batch_size=max(cfg.training.eval_batch_size,          # default 8
-                      cfg.training.global_batch_size // cfg.training.accum_steps * 4)
+```
+1b_ttt_e2e_finetune_books_8k_1x_cc/        <- must contain an integer step dir, e.g. 1250/model_weights/
+llama3-books3/                              <- the store ROOT
+  zarr.json
+  train/zarr.json                           <- metadata only; train.py:125 opens /train
+  val/zarr.json
+  val/c/0  val/c/1                          <- 2 chunks x 100M tokens = 0.8 GB
+  val-subset-manifest.json
 ```
 
-so the eval runs at **batch 8** whether `global_batch_size` is 1 or 2, and the two
-batch-dependent terms below are 8× what §9.4 assumed.
+Also ask for `checkpoint-sha256-1b_ttt_e2e_finetune_books_8k_1x_cc.txt` (written by the fetch).
+With it, the bootstrap **verifies** every byte you received. Without it, the bootstrap
+only fingerprints what arrived.
 
-| Term | Size | Source |
-|---|---|---|
-| Params, fp32 | 5.9 GB | 1.467B × 4 B (COST_MODEL §2.1) |
-| **Outer AdamW state** | **11.7 GB** | `train.py:180` runs `optimizer_outer_loop.init(...)` even in eval mode — `load_part="params"` means `opt_state` is absent from the restore, so it is built from scratch and then never used |
-| Dtype-cast model copy | 0–5.9 GB | `transformer.py:685`, at `state_dtype=fp32`; XLA may elide it |
-| Adapted fast weights, ×8 batch | 5.1 GB | 160.4M × 4 B × 8, vmapped at `loop.py:29` |
-| Per-chunk logits + fp32 log-softmax | ~10.5 GB | `[8, 1024, 128256]`; `loss.py:18` casts to fp32 before `log_softmax` |
-| Prefix output + embeddings | ~1.1 GB | `[8, 8192, 2048]` |
-| Remat'd chunk activations | 2–4 GB | bounded by `scan_remat_chunk` + `eqx.filter_checkpoint` |
-| **Total** | **≈ 36–49 GB** | |
-
-A 40 GB card sits inside that range, and the range has never been measured. **Record the
-actual peak this session** (`nvidia-smi --query-gpu=memory.used`) and §9.4 can be settled with
-evidence, in the right direction: downsize the *next* booking, do not gamble this one.
-
-**Recommendation, at COST_MODEL §9.3's JarvisLabs rates:**
-
-| | Rate | 4 h | Verdict |
-|---|---|---|---|
-| **H100 80 GB** | ₹255/hr | **≈ ₹1,020 (~$12)** | **Rent this.** COST_MODEL §3's throughput anchors are H100 prefill latencies, so the time estimates apply directly instead of being extrapolated — you get roughly 2× the tokens in a fixed window for 1.8× the rate |
-| A100 80 GB | ₹141/hr | ≈ ₹564 (~$7) | Fine, but expect ~2× the wall-clock per pass. Halve `VAL_TOKENS` |
-| A100 40 GB | ₹84/hr | ≈ ₹336 (~$4) | **No.** Saves ~₹460 and risks the whole booking on an unmeasured estimate |
-
-All three are far inside the **$150** Phase 0.5 cap. The binding constraint on this session is
-the **12-GPU-hour stop rule**, not money.
+If both directories are present, the bootstrap never touches GCS, gsutil or gcloud. That was
+rehearsed: stub `gsutil`/`gcloud` binaries were never called.
 
 ---
 
-## 2. Bootstrap
+## 1. What to rent: E2E Networks
+
+**Why E2E:** it takes UPI (cards are not an option), bills per minute, offers 80 GB cards,
+and gives a real Linux shell with tmux and a persistent disk.
+**Why not Colab:** its A100 is 40 GB, which sits inside the unmeasured 36–49 GB estimate
+(COST_MODEL §9.4.1). Its runtime disconnects and wipes the disk mid-eval, and there is no tmux.
+
+| Choose | Why |
+|---|---|
+| **H100 80 GB** (else A100 80 GB) | 36–49 GB estimated peak, never measured. Do not gamble on 40 GB |
+| Ubuntu 22.04 image whose `nvidia-smi` shows **CUDA Version ≥ 12.8** (driver ≥ 570) | The vendor lock pins CUDA 12.8 / cuDNN 9.8 pip wheels; the host supplies only the driver. The bootstrap refuses < 525 and warns < 570 |
+| **≥ 150 GB disk** | vendor env ~10 GB, checkpoint 5.4 GB, val 0.8 GB, XLA cache, logs |
+| Prepaid credits via UPI for **~6 hours** | Session plan below is ~4 h. Check the live hourly rate at booking and write it in the booking row |
+
+---
+
+## 2. On the box: four commands
 
 ```bash
-git clone --recursive <org remote> TTT && cd TTT
-git checkout infra/gpu-session-1        # or main, once this has merged
+tmux new -s ttt                                  # ALWAYS. A dropped SSH kills an eval otherwise
+git clone --recursive https://github.com/Deep-Learning-130/Trust-Gated-Fast-Weight-Updates-for-TTT-E2E-LLMs.git TTT
+cd TTT && git checkout infra/gpu-session-1
 
-export GCP_BILLING_PROJECT=...  WANDB_ENTITY=...  WANDB_PROJECT=...  WANDB_KEY=...
-export DATA_ROOT=/path/to/persistent/data
-export EXP_DIR=/path/to/persistent/runs   # MUST be outside the repo; the script enforces it
+# from your laptop, in another terminal: side-load the data (see §0.1)
+#   rsync -avP 1b_ttt_e2e_finetune_books_8k_1x_cc llama3-books3 <user>@<box-ip>:/mnt/data/
 
-bash scripts/bootstrap_gpu_box.sh
+export WANDB_ENTITY=…  WANDB_PROJECT=…  WANDB_KEY=…
+export DATA_ROOT=/mnt/data  EXP_DIR=/mnt/runs
+export CKPT_DIR=/mnt/data/1b_ttt_e2e_finetune_books_8k_1x_cc
+export CKPT_SHA_MANIFEST=/mnt/data/checkpoint-sha256-1b_ttt_e2e_finetune_books_8k_1x_cc.txt   # if you have it
+
+bash scripts/bootstrap_gpu_box.sh               # ~30-50 min, mostly `uv sync`
+DEADLINE_HOURS=3 bash scripts/run_gpu_session.sh   # unattended; set to the hours LEFT in the booking
 ```
 
-Idempotent — re-running after a partial failure is the intended repair. It installs `uv` and
-the gcloud SDK if missing, pins the vendor submodule, syncs the vendor env, fetches the
-checkpoint, builds a truncated `/val`, and writes five scripts into `$EXP_DIR/bootstrap/`.
+The org repo is private, so cloning needs a credential. Use a **fine-grained read-only token
+scoped to this one repo**, and revoke it after the session. Or clone the public `origin`,
+which holds the same history.
 
-**Set `EXP_DIR` and `DATA_ROOT` to whichever JarvisLabs path actually persists.** The default
-is `$HOME`, which on some images is ephemeral.
+**Bootstrap, and what it stops on:** a driver too old; JAX unable to see or compute on the GPU
+(this is the "kill inside 30 minutes" rule, automated); a checkpoint without an orbax step
+directory; a checksum mismatch; a store missing `zarr.json` or `train/zarr.json`; a dirty vendor tree.
+Every step is idempotent. Re-running after a fix is the intended repair.
 
----
+**`run_gpu_session.sh` runs, in order:**
 
-## 3. The session
-
-Times are nominal on an H100. The smoke pass is where the four known first-launch failures
-happen; budget for them there, not in the real run.
-
-| | Step | Command | Nominal |
-|---|---|---|---|
-| 0:00 | Claim booking row; `nvidia-smi`; check CUDA/cuDNN | | 0:15 |
-| 0:15 | Bootstrap (installs, `uv sync --frozen`, checkpoint, val subset) | `bash scripts/bootstrap_gpu_box.sh` | 0:50 |
-| 1:05 | **Smoke pass** — 2 eval batches, same command as the real run | `bash $EXP_DIR/bootstrap/1-smoke-*.sh` | 0:30 |
-| 1:35 | Read tokens/sec off the smoke pass; size the real run | `bash $EXP_DIR/bootstrap/reshape-to-real.sh <tokens>` | 0:05 |
-| 1:40 | Baseline, run 1 | `bash $EXP_DIR/bootstrap/2-eval-*.sh` | 0:35 |
-| 2:15 | Baseline, run 2 — **unchanged**, for bar S2 | same command again | 0:35 |
-| 2:50 | Negative control, bar S3 | `bash $EXP_DIR/bootstrap/3-dummy-control-*.sh` | 0:10 |
-| 3:00 | Copy results out; fill Outcome; release | §6 below | 0:15 |
-
-### Sizing the real run
-
-`VAL_TOKENS` is the only knob that sets eval wall-clock, and it is not a config value — it is
-the zarr array's declared shape, which `lm_dataset.py:27` divides by `seq_len` to get the
-batch count. Change it with a reshape; **nothing is refetched and the XLA cache still hits**,
-because batch size and sequence length do not change.
-
-```bash
-python3 scripts/make_val_subset.py --dest $DATA_ROOT/llama3-books3 reshape --tokens 150000000
-python3 scripts/make_val_subset.py --dest $DATA_ROOT/llama3-books3 status
-```
-
-Pick the number so **two** passes fit the time remaining. Default 150M ≈ 18,310 sequences.
-`reshape` refuses a shape larger than the chunks on disk — absent zarr chunks read as fill
-value 0, which would evaluate the model on padding and return a confident, meaningless loss
-with no error at all.
-
-### If the smoke pass OOMs
-
-Lower the eval batch from 8 to 4 — it needs **both** overrides, because of the `max()`:
-
-```
-training.global_batch_size=1 training.eval_batch_size=4
-```
-
-That halves the two batch-dependent memory terms (~10.5 GB → ~5.2 GB, and 5.1 GB → 2.6 GB).
-Record it in the Outcome: it changes the run condition, though not the quantity being
-estimated.
-
----
-
-## 4. Stop rules — already decided, so they are not judgement calls at 2am
-
-- **12 GPU-hours without a completed eval.** Release, write down what broke, re-book. Session
-  2 is always cheaper than hour 13.
-- **Wrong environment** (CUDA mismatch, driver failure): kill it **inside 30 minutes**. Do not
-  debug a broken image while it bills. Pick a different image.
-- **Cumulative Phase 0.5 spend past $325.** Raising a cap is a written decision by the Lead.
-
-### Drop order if you are overrunning
-
-In this order, and record each omission in the Outcome:
-
-1. **Baseline run 2** — record bar S2 as *unverified*. An honest recorded gap beats a lost session.
-2. **The negative control** (bar S3).
-3. **Token count** — reshape smaller and rerun.
-
-**Never drop the copy-out.** `results/`, `*.npy` and `wandb/` are all git-ignored; a run that
-is not deliberately transcribed leaves no record, and re-running costs another booking.
-
----
-
-## 5. Acceptance — read the bar before the number (Rule 5)
-
-`TOLERANCE.md` §4.1 and §5. All five, and the structural ones do most of the real work:
-
-| | Check | Pass condition |
+| Phase | What | Nominal (H100) |
 |---|---|---|
-| ☐ | **Band** | `2.314 < train_holdout/loss < 2.805` nats/token |
-| ☐ | **S1 — monotonicity** | per-token NLL falls monotonically across the sequence |
-| ☐ | **S2 — determinism** | the identical command, rerun, agrees to **4 decimals** |
-| ☐ | **S3 — negative control** | `dummy_dataset=true` lands **far above** the band |
-| ☐ | **S4 — resolved config** | the run's own echo shows `dataset_name == books3` |
-| ☐ | Gate absent | `trustgate.vendor_patch.is_installed()` is `False`; no `trustgate` import anywhere in the run (T1.6) |
+| smoke | reshape to 131,073 tokens (2 batches), run the real command | compile 5–20 min |
+| eval-1 | reshape to 150M tokens, baseline | ~35 min + compile |
+| eval-2 | identical command, for bar S2 | ~35 min + compile |
+| control | `dummy_dataset=true`, for bar S3 | ~10 min + compile |
+| collect | redact secrets, copy into `results/session-<utc>/`, score against TOLERANCE.md | 1 min |
 
-Inside the band but outside **2.60–2.70** is a non-binding expectation miss (§4.3) —
-investigate before recording, but it is not a FAIL.
+**Every run compiles from scratch.** Each eval is a new process. The XLA cache directory is
+wired through (`backend.compilation_cache_dir`, because `train.py:278` ignores the env var),
+but it does not save the trace-and-compile of the model. Budget it per run.
 
-**A FAIL stops the session.** Nothing measured downstream is attributable until the baseline
-passes; that is the entire reason experiment 000 exists.
+**What it handles on its own:**
+- **OOM on the smoke pass:** retries once at eval batch 4 (`global_batch_size=1 eval_batch_size=4`). Every later run keeps that batch, and the summary records `RUN CONDITION CHANGED`.
+- **Overrunning:** the runbook's drop order (§4) applied against `DEADLINE_HOURS`. Run 2 goes first, then the control, and each is recorded as UNVERIFIED, never as passed.
+- **A crash:** stops, prints the log tail, and tells you how to resume, e.g. `START_AT=control bash scripts/run_gpu_session.sh`.
+- **Peak GPU memory:** sampled every 5 s into the summary. This is the COST_MODEL §9.4.1 measurement.
+
+---
+
+## 3. Stop rules, decided in advance so nothing is a judgement call at 2am
+
+- **Bootstrap Step 3 fails** (JAX cannot run on the GPU): release the box. Do not debug a broken image while it bills.
+- **12 GPU-hours without a completed eval:** release it, write down what broke, re-book.
+- **Cumulative Phase 0.5 spend past $325:** raising a cap is a written decision by the Lead.
+- **A FAIL verdict stops the session.** Nothing downstream is attributable until the baseline passes.
+
+## 4. Drop order, if overrunning
+
+1. **Baseline run 2.** S2 is recorded as unverified.
+2. **The negative control.** S3 is recorded as unverified.
+3. **Token count.** Reshape smaller with `bash $EXP_DIR/bootstrap/reshape-to-real.sh <tokens>` and use `START_AT=eval-1`.
+
+**Never drop the copy-out.**
+
+---
+
+## 5. Acceptance: printed for you, but read the bar first (Rule 5)
+
+`scripts/check_baseline_acceptance.py` runs at the end and writes `ACCEPTANCE.txt`:
+
+| Check | Pass condition (TOLERANCE.md) |
+|---|---|
+| Band | `2.314 < train_holdout/loss < 2.805` |
+| S1 | mean NLL over the last 1024 positions < mean over positions 128–1152 |
+| S2 | run 2 matches run 1 to 4 decimals (|diff| < 5e-5) |
+| S3 | the control lands above the band. **Read the value yourself** against "order 10–12 nats"; the script invents no cut-off |
+| S4 | config echo says `dataset_name: books3`; no `trustgate` in any log |
+| §4.3 | 2.60–2.70, **non-binding**. Outside it means investigate, not FAIL |
+
+Exit 0 = PASS, 1 = FAIL, 2 = NOT YET PASS (something unverified).
 
 ---
 
 ## 6. Copy-out, then release
 
+The vendor logs **every environment variable and the W&B key** (`train.py:80-81`), and this
+repo is public. `collect_results.py` redacts them and then re-scans the copy, failing if any
+secret survives. **Only copy the `results/session-<utc>/` directory off the box**, never the raw
+`$EXP_DIR`. The copy is pulled from the laptop, so no GitHub credentials go on the box:
+
 ```bash
-R=experiments/000-repro-baseline/results
-cp $EXP_DIR/demo/eval-<ckpt>/train_holdout_token_nll_loss.npy  $R/
-cp $DATA_ROOT/llama3-books3/val-subset-manifest.json           $R/
-cp $EXP_DIR/bootstrap/env-record.txt                           $R/
-cp $EXP_DIR/bootstrap/bootstrap-*.log                          $R/
+# on the laptop
+scp -r <user>@<box-ip>:~/TTT/experiments/000-repro-baseline/results/session-<utc>  experiments/000-repro-baseline/results/
 ```
 
-Then write a single tracked file recording: **our number, the bar, PASS/FAIL**, the checkpoint
-sha256, the vendor SHA, the overlay SHA, the env versions, the peak GPU memory, and the exact
-commands if they differed from the generated ones. `results/` is git-ignored — this file has
-to be added deliberately.
-
-The manifest is not optional bookkeeping. The baseline was measured over a **subset** of
-`/val`; without the manifest the number cannot name the tokens it was computed over, and
-`TOLERANCE.md` §8's dated note is the other half of that record.
-
-**Fill in the Outcome column in `gpu-bookings.md`.** What ran, what it produced, what broke,
-how far it got, and anything the next holder must know. Two honest sentences beat a clean
-blank. **The box is not free until that is done.**
+Then **release the box**, and write the tracked record. `results/` is git-ignored, so one file
+must be added deliberately. It records: the number, the bar, the verdict, the checkpoint
+`manifest_sha256`, the vendor and overlay SHAs, env versions, peak GPU memory, and any run
+condition change. Fill in the Outcome column in `gpu-bookings.md`.
 
 ---
 
 ## 7. What this session is not
 
-The **001 kill gate** does not run here. `cli.py main()` still raises `SystemExit` on any
-non-`--dry-run` invocation — every piece exists (`vendor_bind.bind`,
-`harness.make_adapt_and_eval`, `craft.craft_stream` for SELECT+DEGRADE, `run_attack_spike`,
-`report.write_report`) but nothing joins them to `--checkpoint`. That wiring is a separate
-branch with CPU tests, done cold. `PREREGISTERED.md` requires a passing baseline first
-regardless.
+The **001 kill gate** does not run here. `cli.py` runs the spike only against a random-init
+victim (`--random-init`); nothing yet joins it to a real `--checkpoint`, and `PREREGISTERED.md`
+requires a passing baseline first regardless.

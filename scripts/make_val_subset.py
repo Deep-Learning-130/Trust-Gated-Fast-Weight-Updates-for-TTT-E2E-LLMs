@@ -374,6 +374,26 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_covers(args: argparse.Namespace) -> int:
+    """Exit 0 iff a local store holds real chunks for `--tokens` (capped at /val).
+
+    This is how the bootstrap decides whether it needs GCS at all. A side-loaded
+    store that already covers the request must not trigger a fetch -- `fetch`
+    reads metadata through gsutil, so it would demand a billing project for
+    bytes already on disk. Silent: the caller prints the decision.
+    """
+    dest = Path(args.dest)
+    meta_path = dest / "val" / "zarr.json"
+    if not meta_path.exists():
+        return 1
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    manifest_path = dest / MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+    original = manifest.get("original_shape", shape_of(meta))
+    covered = len(chunk_files(dest)) * chunk_shape_of(meta)
+    return 0 if covered >= min(args.tokens, original) > 0 else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="make_val_subset.py",
@@ -397,6 +417,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("status", help="what is on disk and what shape is declared")
     s.set_defaults(func=cmd_status)
+
+    c = sub.add_parser("covers", help="exit 0 iff chunks on disk cover --tokens (no output)")
+    c.add_argument("--tokens", type=int, required=True)
+    c.set_defaults(func=cmd_covers)
 
     return parser
 

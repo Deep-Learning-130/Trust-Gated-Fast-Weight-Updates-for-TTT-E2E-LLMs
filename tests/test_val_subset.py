@@ -222,3 +222,32 @@ def test_sequence_arithmetic_matches_the_vendor_loader(tokens, expected_sequence
 def test_reshape_on_a_missing_store_fails_loudly(tmp_path):
     with pytest.raises(SystemExit):
         vs.main(["--dest", str(tmp_path), "reshape", "--tokens", "1000"])
+
+
+# ------------------------------------------------------------------- covers ---
+# The bootstrap asks this before deciding whether it needs GCS at all. A wrong
+# "no" demands a billing project for bytes already on disk; a wrong "yes" skips
+# a fetch the run needs and the eval then reads fill values.
+
+
+def test_covers_when_chunks_on_disk_reach_the_request(tmp_path):
+    build_store(tmp_path, n_chunks=3, shape=ORIGINAL)
+    assert vs.main(["--dest", str(tmp_path), "covers", "--tokens", str(3 * CHUNK)]) == 0
+
+
+def test_covers_refuses_a_request_beyond_the_chunks_on_disk(tmp_path):
+    build_store(tmp_path, n_chunks=3, shape=ORIGINAL)
+    assert vs.main(["--dest", str(tmp_path), "covers", "--tokens", str(3 * CHUNK + 1)]) == 1
+
+
+def test_covers_reads_the_original_shape_after_a_smoke_reshape(tmp_path):
+    """After reshaping down to the smoke size the declared shape is tiny; the
+    request must still be judged against the chunks, not against that shape."""
+    build_store(tmp_path, n_chunks=3, shape=ORIGINAL)
+    vs.main(["--dest", str(tmp_path), "reshape", "--tokens", str(SMOKE_TOKENS)])
+    assert vs.main(["--dest", str(tmp_path), "covers", "--tokens", str(2 * CHUNK)]) == 0
+    assert vs.main(["--dest", str(tmp_path), "covers", "--tokens", str(5 * CHUNK)]) == 1
+
+
+def test_covers_on_a_missing_store_says_no(tmp_path):
+    assert vs.main(["--dest", str(tmp_path), "covers", "--tokens", "1000"]) == 1
