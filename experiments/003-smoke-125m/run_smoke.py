@@ -30,7 +30,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-VENDOR_CONFIGS = ROOT / "vendor" / "ttt-e2e" / "configs"
 RESULTS = Path(__file__).resolve().parent / "results"
 
 sys.path.insert(0, str(ROOT / "src"))
@@ -84,99 +83,27 @@ def check(name: str, why: str):
 
 
 # ---------------------------------------------------------------------------
-# Config
+# Config and model
 # ---------------------------------------------------------------------------
+# These used to live here. They now live in `trustgate.eval.model_build`,
+# because `trustgate.eval.cli` needs the same victim and two copies of a config
+# this fiddly would drift. The overrides and their reasons moved with them.
+
+from trustgate.eval.model_build import (  # noqa: E402
+    build_config as _build_config,
+    build_model,
+    dummy_tokens,
+)
 
 
 def build_config(args):
-    """Compose the vendor's own hydra config, overridden for one small GPU.
-
-    Composed rather than hand-built so the smoke run exercises the same config
-    path `train.py` does. Every override below has a reason; see README.
-    """
-    from hydra import compose, initialize_config_dir
-    from ttt.config import register_configs
-
-    register_configs()
-
-    overrides = [
-        # `+` is required: neither group is in config.yaml's defaults list.
-        # EVAL_ENTRYPOINT.md section 1 documents this, and the vendor README
-        # (:61-66) uses the same form.
-        "+experiment=125m/extension/ext-125m-e2e-32K",
-        "+deploy=interactive",
-        # `dataset_path` interpolates `deploy_paths.data[...]`, which ships as
-        # `???` in interactive.yaml:9. Nothing reads it under dummy_dataset, but
-        # OmegaConf resolves it eagerly, so it needs *a* value. No `+` here --
-        # the key already exists, it is merely MISSING.
-        "deploy_paths.data.books3=/dev/null",
-        "training.dummy_dataset=true",
-        "training.eval_mode=true",
-        "training.log_wandb=false",
-        f"training.seq_length={args.seq_length}",
-        # Note: these do NOT give an eval batch of 1. `train.py:212` takes
-        # max(eval_batch_size, global_batch_size // accum_steps * 4), so the
-        # floor is 4 (EVAL_ENTRYPOINT.md section 5, gotcha 1). It does not
-        # matter here -- this runner never calls `evaluator.eval_fn`, it drives
-        # `loss_for_sequence` directly -- but it will matter for Phase 0.5.
-        "training.global_batch_size=1",
-        "training.eval_batch_size=1",
-        "training.n_data_parallel=1",
-        "training.n_state_parallel=1",
-        f"training.exp_dir={args.exp_dir}",
-        "backend.distributed=false",
-        "backend.num_devices=1",
-        'backend.local_device_ids="0"',
-    ]
-    if args.compute_dtype:
-        # T4 is Turing: no native bf16. Override to fp32 there and record it.
-        overrides.append(f"model.compute_dtype={args.compute_dtype}")
-
-    with initialize_config_dir(config_dir=str(VENDOR_CONFIGS), version_base=None):
-        cfg = compose(config_name="config", overrides=overrides)
-
-    # train.py:123 -- the model reads its length from here, not from training.
-    cfg.model.seq_len = cfg.training.seq_length
-    return cfg
-
-
-def build_model(cfg):
-    """`train.py:127-132`, minus the sharding of a single device."""
-    import equinox as eqx
-    import jax
-    from ttt.model.sharding import ModelSharding
-    from ttt.model.transformer import MetaModel
-    from ttt.utils.jax_utils import set_random_seed
-
-    key = set_random_seed(cfg.training.model_seed)
-    model_sharding = ModelSharding(cfg)
-
-    @eqx.filter_jit
-    def create():
-        model, state = eqx.nn.make_with_state(MetaModel)(cfg, key=key)
-        state = jax.device_put(
-            state, jax.NamedSharding(model_sharding.mesh, jax.sharding.PartitionSpec())
-        )
-        return model_sharding.shard_params(model), state
-
-    with model_sharding.mesh:
-        model, state = create()
-    return model, state, model_sharding.mesh
-
-
-def dummy_tokens(n: int, seed: int, vocab_lo: int = 0, vocab_hi: int = 20):
-    """Match `DummyDataset.__getitem__` (`lm_dataset.py:36`): ids in [0, 20).
-
-    Note what this means for the loss bar below. The *targets* only span 20
-    ids, but a random-init model spreads its mass over all 128256, so CE starts
-    at ln(128256). It would fall toward ln(20) only after training -- which is
-    the tell that this model has learned the dummy distribution and not
-    language.
-    """
-    import numpy as np
-
-    rng = np.random.default_rng(seed)
-    return np.asarray(rng.integers(vocab_lo, vocab_hi, n, dtype=np.int32))
+    """Adapt this runner's argparse namespace to `model_build.build_config`."""
+    return _build_config(
+        size="125m",
+        seq_length=args.seq_length,
+        compute_dtype=args.compute_dtype,
+        exp_dir=args.exp_dir,
+    )
 
 
 # ---------------------------------------------------------------------------
