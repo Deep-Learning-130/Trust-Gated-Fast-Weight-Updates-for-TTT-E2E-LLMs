@@ -35,10 +35,10 @@ the stack would catch it.
 Usage
 -----
     # fetch + truncate (needs gsutil and a billing project)
-    GCP_BILLING_PROJECT=proj python scripts/make_val_subset.py fetch --tokens 150000000
+    GCP_BILLING_PROJECT=proj python scripts/make_val_subset.py fetch --tokens 50000000
 
     # plan only, no transfer
-    GCP_BILLING_PROJECT=proj python scripts/make_val_subset.py fetch --tokens 150000000 --probe-only
+    GCP_BILLING_PROJECT=proj python scripts/make_val_subset.py fetch --tokens 50000000 --probe-only
 
     # resize between runs, no network, no refetch -- the smoke-pass move
     python scripts/make_val_subset.py reshape --tokens 131073
@@ -61,7 +61,7 @@ import sys
 from pathlib import Path
 
 DEFAULT_BUCKET = "gs://llama3-books3"
-DEFAULT_TOKENS = 150_000_000
+DEFAULT_TOKENS = 50_000_000  # 1 chunk; see TOLERANCE.md s8, 2026-09-16 cost revision
 SEQ_LENGTH = 8192  # ADR-004; the only seq_length this project evaluates at
 EVAL_BATCH = 8  # train.py:211 floors the eval batch here regardless of gbs
 

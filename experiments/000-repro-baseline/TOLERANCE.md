@@ -296,6 +296,7 @@ with the reason, and leaves the superseded value visible.
 |---|---|---|
 | 2026-08-08 | Initial pre-registration. Nothing observed. | — |
 | 2026-09-16 | **No bar moved.** Scope note: the first 1B baseline will be measured over a *truncated* `/val`. See below. | The 2026-09-14 probe put `/val` at 2.0B tokens; a full pass is ~7.5 GPU-h and bar S2 wants two of them. |
+| 2026-09-16 | **No bar moved.** Default subset lowered from 150M to **50M tokens** (6,103 sequences). See the second note below. | Cost: the session is paid per minute by one person, and the band does not need 150M. |
 
 ### 2026-09-16 — measuring the baseline over a subset of `/val`
 
@@ -333,3 +334,24 @@ baseline that cannot name the tokens it was computed over is not a result.
 
 **This is not a Rule 5 revision.** No bar moved. It is a scope note about what was measured,
 which Rule 5 requires be written *before* the run rather than after.
+
+### 2026-09-16 (second note): 50M tokens, not 150M
+
+**Also written before the run, before any number exists.**
+
+The default subset is now **50,000,000 tokens**: 6,103 sequences, 762 eval batches, the
+first of `/val`'s 100M-token chunks. On an A100 80 GB that is roughly 20–25 minutes per pass
+instead of about an hour, and the two passes bar S2 needs cost about 1.5 fewer GPU-hours. It
+also halves the `/val` download (one chunk, 0.4 GB).
+
+**Why the band still holds.** Section 4.1's band is 0.49 nats wide, and its nearer edge sits
+about 0.3 nats from the 4.3 expectation. Even if sequences are strongly correlated within
+books, say ~300 books at 50M tokens with a per-book mean-CE spread of 0.3 nats, the standard
+error on the mean is about 0.02 nats, an order of magnitude inside the distance to either
+edge. S1 averages its curve over 6,103 sequences, and S2 and S3 do not depend on the subset
+size.
+
+**What it costs, beyond the first note's caveats.** The first-N-tokens caveat bites harder:
+50M tokens covers fewer books, so if `/val` is ordered by source the subset is less
+representative. The 4.3 expectation is weaker evidence still. None of this touches a bar.
+

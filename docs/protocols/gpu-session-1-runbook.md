@@ -1,170 +1,152 @@
 # GPU session 1: runbook
 
-> **One page, in order.** Written 2026-09-16 before the first booking, and revised the same
-> day after the scripts were rehearsed end to end on a fake box.
-> Target: **the 1B Books @8K baseline in one session on E2E Networks.** Tasks `P0-1` / `T1.4`–`T1.7`.
-> Supporting detail: `COST_MODEL.md` §4/§9, `TOLERANCE.md` §4–§5, `EVAL_ENTRYPOINT.md`.
+> **One page, in order.** Revised 2026-09-16 for the lowest-cost route. Manas takes over the
+> data download (Jaykay is on leave; his 2026-09-14 probe was metadata only, so no files exist
+> anywhere yet). Target: **the 1B Books @8K baseline in one E2E session of about 3 hours.**
+> Tasks `P0-1` / `T1.4`–`T1.7`. Detail: `COST_MODEL.md` §4/§9, `TOLERANCE.md` §4, §5 and §8.
 
----
+## Cost plan
 
-## 0. Before you rent: none of this can be fixed while the box bills
-
-| | Item | How to prove it |
+| Item | Estimate | Note |
 |---|---|---|
-| ☐ | **Checkpoint and val subset are on a disk you control** | See §0.1. This is the blocker. Without these files a booking produces nothing |
-| ☐ | **W&B credentials work the way the vendor uses them** | `WANDB_ENTITY=… WANDB_PROJECT=… WANDB_KEY=… uv run --no-project --with wandb==0.19.9 python scripts/preflight_wandb.py` exits 0 |
-| ☐ | **This branch is pushed** | The box clones it. `git log origin/infra/gpu-session-1 -1` shows the commit you mean to run |
-| ☐ | **`TOLERANCE.md` §4.1 and §5 read.** You know the bar before any number exists | Standing Rule 5 |
-| ☐ | **Booking row claimed** in `gpu-bookings.md` | The record is the lock |
+| GCP UPI prepayment | ₹500–1,000, **once** | Sits as credit on the billing account. Egress uses about ₹60–120 of it |
+| Download egress | ~5.75 GB | 5.35 GB checkpoint plus **one** 0.4 GB `/val` chunk |
+| **E2E A100 80 GB**, ~3 h | $2.10/h ≈ **₹650 incl. 18% GST** | Bad day, 4 h: ≈ ₹870 |
 
-### 0.1 The data, and why there is no Google Cloud step
-
-The 1B checkpoint (`1b_ttt_e2e_finetune_books_8k_1x_cc`, 5.35 GB) and books3 `/val` exist **only**
-in requester-pays GCS buckets, and there is no mirror (COST_MODEL §9.2). **No Google Cloud
-account is used in this plan.** Someone who has access has to hand the files over. Anyone
-with a GCP billing project can run `fetch_checkpoints.sh` and `make_val_subset.py fetch
---tokens 200000000` on their own machine. Either way, you need two directories:
-
-```
-1b_ttt_e2e_finetune_books_8k_1x_cc/        <- must contain an integer step dir, e.g. 1250/model_weights/
-llama3-books3/                              <- the store ROOT
-  zarr.json
-  train/zarr.json                           <- metadata only; train.py:125 opens /train
-  val/zarr.json
-  val/c/0  val/c/1                          <- 2 chunks x 100M tokens = 0.8 GB
-  val-subset-manifest.json
-```
-
-Also ask for `checkpoint-sha256-1b_ttt_e2e_finetune_books_8k_1x_cc.txt` (written by the fetch).
-With it, the bootstrap **verifies** every byte you received. Without it, the bootstrap
-only fingerprints what arrived.
-
-If both directories are present, the bootstrap never touches GCS, gsutil or gcloud. That was
-rehearsed: stub `gsutil`/`gcloud` binaries were never called.
+**Why these choices:**
+- **A100 80 GB, not H100 ($2.69/h).** Much of this session is install and XLA compile, which don't get faster on a pricier card.
+- **Not the L40S ($1.20/h, 48 GB).** It would save about ₹200, but 48 GB sits inside the 36–49 GB memory estimate. It could force the batch-4 fallback or fail outright.
+- **Not Colab.** 40 GB, and it wipes the disk on disconnect.
+- **50M eval tokens, not 150M** (`TOLERANCE.md` §8, second note). This saves about 1.5 GPU-hours and no bar moves.
+- **The download happens on the box, in parallel with `uv sync`.** It adds no GPU minutes. Uploading 6 GB from home would bill 20–45 minutes.
 
 ---
 
-## 1. What to rent: E2E Networks
+## Part A: before renting (free, laptop)
 
-**Why E2E:** it takes UPI (cards are not an option), bills per minute, offers 80 GB cards,
-and gives a real Linux shell with tmux and a persistent disk.
-**Why not Colab:** its A100 is 40 GB, which sits inside the unmeasured 36–49 GB estimate
-(COST_MODEL §9.4.1). Its runtime disconnects and wipes the disk mid-eval, and there is no tmux.
+### A1. Google Cloud billing, paid by UPI (one time)
+1. Go to <https://console.cloud.google.com> and create a **project**, e.g. `ttt-egress`.
+2. Go to **Billing → Create billing account**, country India, and choose **UPI** as the payment method. Google asks for a **prepayment (typically ₹500–1,000)**; pay it by scanning the QR code with your UPI app. Docs: [Use UPI for Google Cloud payments](https://docs.cloud.google.com/billing/docs/resources/upi-payment-india).
+3. Link the billing account to the project, and note the **project ID** (not the name).
+4. An India billing account must complete **identity verification within 30 days**, or Google suspends it. Do it now, while you remember.
 
-| Choose | Why |
-|---|---|
-| **H100 80 GB** (else A100 80 GB) | 36–49 GB estimated peak, never measured. Do not gamble on 40 GB |
-| Ubuntu 22.04 image whose `nvidia-smi` shows **CUDA Version ≥ 12.8** (driver ≥ 570) | The vendor lock pins CUDA 12.8 / cuDNN 9.8 pip wheels; the host supplies only the driver. The bootstrap refuses < 525 and warns < 570 |
-| **≥ 150 GB disk** | vendor env ~10 GB, checkpoint 5.4 GB, val 0.8 GB, XLA cache, logs |
-| Prepaid credits via UPI for **~6 hours** | Session plan below is ~4 h. Check the live hourly rate at booking and write it in the booking row |
-
----
-
-## 2. On the box: four commands
-
+### A2. Prove access for free: Google Cloud Shell (no install)
+Open Cloud Shell (the `>_` icon, top right of the console). Upload `scripts/probe_gcs_access.sh`, then:
 ```bash
-tmux new -s ttt                                  # ALWAYS. A dropped SSH kills an eval otherwise
-git clone --recursive https://github.com/Deep-Learning-130/Trust-Gated-Fast-Weight-Updates-for-TTT-E2E-LLMs.git TTT
+GCP_BILLING_PROJECT=<project-id> bash probe_gcs_access.sh
+```
+It must print `ckpt_1b_bytes: 5347020507`. This is metadata only (under $0.05). **If it fails, do not rent.** Fix billing first.
+
+### A3. Prove W&B works (laptop, WSL or Git Bash)
+```bash
+WANDB_ENTITY=<you> WANDB_PROJECT=<project> WANDB_KEY=<key> \
+  uv run --no-project --with wandb==0.19.9 python scripts/preflight_wandb.py
+```
+It must end with `PREFLIGHT OK`.
+
+### A4. Prepare for SSH and the booking
+- If you have no key yet, run `ssh-keygen -t ed25519`. You'll paste `~/.ssh/id_ed25519.pub` into E2E.
+- Top up about **₹1,000** of E2E credit via UPI (the extra is headroom).
+- Add a claim row to `gpu-bookings.md`.
+
+---
+
+## Part B: on the box (billing starts)
+
+### B1. Rent (0:00)
+In the E2E console:
+- **GPU:** A100 80 GB, **on-demand, not spot**. A pre-empted spot box loses the session.
+- **Image:** Ubuntu 22.04 with CUDA ≥ 12.8.
+- **Disk:** ≥ 100 GB.
+- **SSH key:** yours, added.
+
+### B2. Log in, install gcloud, authenticate (0:05, ~10 min)
+```bash
+ssh root@<box-ip>
+tmux new -s ttt                       # always; reattach later with: tmux attach -t ttt
+nvidia-smi                            # "CUDA Version" must be >= 12.8, else destroy the box now
+git clone --recursive https://github.com/Manas-Maahir/Trust-Gated-Fast-Weight-Updates-for-TTT-E2E-LLMs.git TTT
 cd TTT && git checkout infra/gpu-session-1
-
-# from your laptop, in another terminal: side-load the data (see §0.1)
-#   rsync -avP 1b_ttt_e2e_finetune_books_8k_1x_cc llama3-books3 <user>@<box-ip>:/mnt/data/
-
-export WANDB_ENTITY=…  WANDB_PROJECT=…  WANDB_KEY=…
-export DATA_ROOT=/mnt/data  EXP_DIR=/mnt/runs
-export CKPT_DIR=/mnt/data/1b_ttt_e2e_finetune_books_8k_1x_cc
-export CKPT_SHA_MANIFEST=/mnt/data/checkpoint-sha256-1b_ttt_e2e_finetune_books_8k_1x_cc.txt   # if you have it
-
-bash scripts/bootstrap_gpu_box.sh               # ~30-50 min, mostly `uv sync`
-DEADLINE_HOURS=3 bash scripts/run_gpu_session.sh   # unattended; set to the hours LEFT in the booking
+curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts && export PATH="$HOME/google-cloud-sdk/bin:$PATH"
+gcloud auth login --no-launch-browser   # open the printed link on your laptop, paste the code back
 ```
 
-The org repo is private, so cloning needs a credential. Use a **fine-grained read-only token
-scoped to this one repo**, and revoke it after the session. Or clone the public `origin`,
-which holds the same history.
+### B3. Bootstrap (0:15, ~35 min)
+```bash
+export GCP_BILLING_PROJECT=<project-id>
+export WANDB_ENTITY=…  WANDB_PROJECT=…  WANDB_KEY=…
+bash scripts/bootstrap_gpu_box.sh
+```
+What it does, in order:
+- **Checks GCS access in seconds** before anything slow starts.
+- **Downloads in the background** while `uv sync` installs the environment.
+- **Proves JAX can compute on the GPU.**
+- **Waits for the download, then fingerprints the checkpoint.**
+- **Writes the eval commands.**
 
-**Bootstrap, and what it stops on:** a driver too old; JAX unable to see or compute on the GPU
-(this is the "kill inside 30 minutes" rule, automated); a checkpoint without an orbax step
-directory; a checksum mismatch; a store missing `zarr.json` or `train/zarr.json`; a dirty vendor tree.
-Every step is idempotent. Re-running after a fix is the intended repair.
+It must end with `Bootstrap complete`. To watch the download, open a second tmux window (`Ctrl-b c`) and run `tail -f ~/ttt-runs/bootstrap/fetch-*.log`.
 
-**`run_gpu_session.sh` runs, in order:**
+**If it stops:**
+- **At `gcs access`:** your project ID or billing is wrong. Fix it and re-run.
+- **At Step 3** (JAX can't use the GPU): **destroy the box.** Don't debug on the clock.
+- **Anywhere else:** fix it and re-run. Every step resumes.
 
-| Phase | What | Nominal (H100) |
-|---|---|---|
-| smoke | reshape to 131,073 tokens (2 batches), run the real command | compile 5–20 min |
-| eval-1 | reshape to 150M tokens, baseline | ~35 min + compile |
-| eval-2 | identical command, for bar S2 | ~35 min + compile |
-| control | `dummy_dataset=true`, for bar S3 | ~10 min + compile |
-| collect | redact secrets, copy into `results/session-<utc>/`, score against TOLERANCE.md | 1 min |
+### B4. The session, unattended (0:50, ~2 h)
+```bash
+DEADLINE_HOURS=2.5 bash scripts/run_gpu_session.sh
+```
+It runs the smoke test, baseline run 1, baseline run 2, then the negative control, and prints the verdict. Each run recompiles (5–20 min), and each 50M-token pass takes roughly 20–25 min on an A100.
 
-**Every run compiles from scratch.** Each eval is a new process. The XLA cache directory is
-wired through (`backend.compilation_cache_dir`, because `train.py:278` ignores the env var),
-but it does not save the trace-and-compile of the model. Budget it per run.
+You can detach with `Ctrl-b d` and close the laptop. **What it handles on its own:**
+- **Out of memory:** retries once at eval batch 4.
+- **Running late:** drops run 2, then the control, and records each drop.
+- **A crash:** stops and prints a resume command, e.g. `START_AT=eval-2 bash scripts/run_gpu_session.sh`.
 
-**What it handles on its own:**
-- **OOM on the smoke pass:** retries once at eval batch 4 (`global_batch_size=1 eval_batch_size=4`). Every later run keeps that batch, and the summary records `RUN CONDITION CHANGED`.
-- **Overrunning:** the runbook's drop order (§4) applied against `DEADLINE_HOURS`. Run 2 goes first, then the control, and each is recorded as UNVERIFIED, never as passed.
-- **A crash:** stops, prints the log tail, and tells you how to resume, e.g. `START_AT=control bash scripts/run_gpu_session.sh`.
-- **Peak GPU memory:** sampled every 5 s into the summary. This is the COST_MODEL §9.4.1 measurement.
-
----
-
-## 3. Stop rules, decided in advance so nothing is a judgement call at 2am
-
-- **Bootstrap Step 3 fails** (JAX cannot run on the GPU): release the box. Do not debug a broken image while it bills.
-- **12 GPU-hours without a completed eval:** release it, write down what broke, re-book.
-- **Cumulative Phase 0.5 spend past $325:** raising a cap is a written decision by the Lead.
-- **A FAIL verdict stops the session.** Nothing downstream is attributable until the baseline passes.
-
-## 4. Drop order, if overrunning
-
-1. **Baseline run 2.** S2 is recorded as unverified.
-2. **The negative control.** S3 is recorded as unverified.
-3. **Token count.** Reshape smaller with `bash $EXP_DIR/bootstrap/reshape-to-real.sh <tokens>` and use `START_AT=eval-1`.
-
-**Never drop the copy-out.**
+### B5. Copy out, sign out of Google, destroy the box (~2:50)
+```bash
+# on the box: the copy-out folder has the W&B key removed; revoke Google credentials
+gcloud auth revoke --all
+```
+```bash
+# on the laptop
+scp -r root@<box-ip>:/root/TTT/experiments/000-repro-baseline/results/session-*  experiments/000-repro-baseline/results/
+```
+Check that `ACCEPTANCE.txt` and `SESSION_SUMMARY.txt` arrived, then **destroy the box in the E2E console**. Stopping it is not enough, because a stopped box still bills for storage. Copy **only** `results/session-*`, never the raw `~/ttt-runs`, whose logs contain the key.
 
 ---
 
-## 5. Acceptance: printed for you, but read the bar first (Rule 5)
+## Stop rules, decided in advance
 
-`scripts/check_baseline_acceptance.py` runs at the end and writes `ACCEPTANCE.txt`:
+- **Step 3 fails, or `nvidia-smi` shows CUDA < 12.8:** destroy the box within 30 minutes.
+- **The session passes 4 hours without a verdict:** copy out what exists, destroy the box, write down what broke.
+- **The verdict is FAIL:** stop. Nothing downstream is attributable until the baseline passes.
 
-| Check | Pass condition (TOLERANCE.md) |
+## Acceptance (read the bar before the number: Rule 5)
+
+`ACCEPTANCE.txt`, per `TOLERANCE.md`:
+
+| Check | Pass condition |
 |---|---|
 | Band | `2.314 < train_holdout/loss < 2.805` |
 | S1 | mean NLL over the last 1024 positions < mean over positions 128–1152 |
-| S2 | run 2 matches run 1 to 4 decimals (|diff| < 5e-5) |
-| S3 | the control lands above the band. **Read the value yourself** against "order 10–12 nats"; the script invents no cut-off |
-| S4 | config echo says `dataset_name: books3`; no `trustgate` in any log |
-| §4.3 | 2.60–2.70, **non-binding**. Outside it means investigate, not FAIL |
+| S2 | run 2 matches run 1 to 4 decimals |
+| S3 | the control is above the band. **Read the value yourself** against "order 10–12 nats" |
+| S4 | `dataset_name: books3`, and no `trustgate` in any log |
+| §4.3 | 2.60–2.70, **non-binding** |
 
 Exit 0 = PASS, 1 = FAIL, 2 = NOT YET PASS (something unverified).
 
----
+## After
 
-## 6. Copy-out, then release
+Fill in the Outcome column in `gpu-bookings.md`:
+- the verdict and the loss;
+- `peak_gpu_mib` from the summary;
+- any `RUN CONDITION CHANGED` or `SKIPPED` line;
+- the checkpoint `manifest_sha256`;
+- what the session actually cost.
 
-The vendor logs **every environment variable and the W&B key** (`train.py:80-81`), and this
-repo is public. `collect_results.py` redacts them and then re-scans the copy, failing if any
-secret survives. **Only copy the `results/session-<utc>/` directory off the box**, never the raw
-`$EXP_DIR`. The copy is pulled from the laptop, so no GitHub credentials go on the box:
+`results/` is git-ignored, so add one tracked file recording those deliberately.
 
-```bash
-# on the laptop
-scp -r <user>@<box-ip>:~/TTT/experiments/000-repro-baseline/results/session-<utc>  experiments/000-repro-baseline/results/
-```
+## What this session is not
 
-Then **release the box**, and write the tracked record. `results/` is git-ignored, so one file
-must be added deliberately. It records: the number, the bar, the verdict, the checkpoint
-`manifest_sha256`, the vendor and overlay SHAs, env versions, peak GPU memory, and any run
-condition change. Fill in the Outcome column in `gpu-bookings.md`.
-
----
-
-## 7. What this session is not
-
-The **001 kill gate** does not run here. `cli.py` runs the spike only against a random-init
-victim (`--random-init`); nothing yet joins it to a real `--checkpoint`, and `PREREGISTERED.md`
-requires a passing baseline first regardless.
+The **001 kill gate** does not run here. `cli.py` runs the spike only with `--random-init`, and `PREREGISTERED.md` requires a passing baseline first.

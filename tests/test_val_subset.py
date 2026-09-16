@@ -212,6 +212,7 @@ def test_manifest_original_shape_survives_repeated_reshaping(tmp_path):
         (8193, 1),
         (8192, 0),             # one token short of a full sequence
         (150_000_000, 18310),
+        (50_000_000, 6103),    # the default since the 2026-09-16 cost revision
         (ORIGINAL, 244161),    # the full split, for reference
     ],
 )

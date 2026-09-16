@@ -18,14 +18,15 @@ the session is driven by `scripts/run_gpu_session.sh` per `gpu-session-1-runbook
 
 | Task | Owner | Est. h | Budget | Notes |
 |---|---|---|---|---|
-| **Prerequisite, no GPU:** checkpoint + val subset side-loaded, W&B preflight passes | Lead | 0 | ₹0 | **Blocking.** The weights exist only in requester-pays GCS and this plan uses no Google Cloud account. Do not book until both directories are in hand (runbook §0.1). |
-| `P0-1`/`T1.4` provision + `bootstrap_gpu_box.sh` + smoke pass | Lead | 1.5 | at booking rate | Rehearsed end to end on stub binaries; never run on a GPU. The smoke pass is the 1B itself at two eval batches, so it covers memory. |
-| `T1.5`/`T1.6` baseline eval, 1B Books @8K, ×2 for bar S2 | Lead | 2.0 | at booking rate | Each run recompiles; budget 5–20 min per run on top of ~35 min eval. |
-| `T1.7` negative control, acceptance, redacted copy-out | Lead | 0.5 | at booking rate | `check_baseline_acceptance.py` prints the verdict; read the bar first. |
-
-Nominal total ≈ **4 h** on an H100 80 GB (or A100 80 GB). Record the live E2E hourly rate in the
-booking row, because COST_MODEL §9.3's E2E figures are from 2026-09-14. The Phase 0.5 cap stays at **$325**.
-
+| **Prerequisite, no GPU:** own GCP billing via UPI prepay; Cloud Shell probe passes; W&B preflight passes | Manas | 0 | ₹500–1,000 GCP prepay (egress uses ~₹60–120) | Jaykay is on leave, and his 2026-09-14 run was metadata only, so no files exist. The download now happens on the box itself, in parallel with `uv sync`. |
+| `P0-1`/`T1.4` provision, gcloud login, `bootstrap_gpu_box.sh` (download + env), smoke pass | Manas | 1.0 | ~₹220 | Access is checked in seconds before anything slow; a bad GPU image is caught at Step 3. |
+| `T1.5`/`T1.6` baseline eval, 1B Books @8K, **50M tokens**, ×2 for bar S2 | Manas | 1.5 | ~₹330 | Each run recompiles; ~20–25 min per pass on an A100 (`TOLERANCE.md` §8, second note). |
+| `T1.7` negative control, acceptance, redacted copy-out, destroy box | Manas | 0.5 | ~₹110 | `check_baseline_acceptance.py` prints the verdict; read the bar first. |
+
+Nominal total ≈ **3 h on an E2E A100 80 GB at $2.10/h ≈ ₹650 including GST** (bad day 4 h ≈ ₹870).
+Rates checked on e2enetworks.com on 2026-09-16; record the rate actually charged in the booking row.
+The Phase 0.5 cap stays at **$325**.
+
 **Superseded 2026-09-16:** the first revision planned this on JarvisLabs (card-only, unusable)
 with a gcloud login on the box. The earlier plan before that was two sessions totalling ≈6.5 h, with a 125M rehearsal first.
 

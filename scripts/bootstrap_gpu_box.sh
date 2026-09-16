@@ -28,7 +28,7 @@
 #   bash scripts/bootstrap_gpu_box.sh
 #
 # Useful overrides:
-#   VAL_TOKENS=150000000                        # eval length; THE wall-clock knob
+#   VAL_TOKENS=50000000                         # eval length; THE wall-clock knob (TOLERANCE s8)
 #   SMOKE_TOKENS=131073                         # 16 sequences = 2 eval batches
 #   CKPT=125m_ttt_e2e_finetune_books_8k_1x_cc   # +experiment= follows this automatically
 #   CKPT_DIR=/mnt/data/<ckpt>                   # where the checkpoint lives (default: repo checkpoints/)
@@ -55,7 +55,7 @@ EXP_DIR="${EXP_DIR:-$HOME/ttt-runs}"
 BOOKS3_LOCAL="$DATA_ROOT/llama3-books3"
 CKPT_DEST="${CKPT_DIR:-$repo_root/checkpoints/$CKPT}"     # checkpoints/ is git-ignored
 RESULTS="$repo_root/experiments/000-repro-baseline/results"
-VAL_TOKENS="${VAL_TOKENS:-150000000}"
+VAL_TOKENS="${VAL_TOKENS:-50000000}"      # 6,103 sequences; one 100M-token chunk to fetch
 SMOKE_TOKENS="${SMOKE_TOKENS:-131073}"   # 16 sequences = exactly 2 eval batches
 
 say()  { printf '\n==> %s\n' "$*"; }
@@ -166,6 +166,22 @@ if [[ "$need_gcs" == "1" ]]; then
        Both buckets are requester-pays; the fetch cannot start without it."
   fi
   echo "    gcloud    : $(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)"
+  # Seconds, metadata only. The likeliest failure -- the account cannot bill to
+  # the project, or a path is wrong -- must surface HERE, not after `uv sync` has
+  # spent half an hour of GPU billing and the background download reports it.
+  if [[ "$ckpt_present" != "1" ]]; then
+    gsutil -u "$GCP_BILLING_PROJECT" du -s "$BUCKET/$CKPT" >/dev/null 2>"$EXP_DIR/bootstrap/gcs-access-check.err" \
+      || die "cannot read $BUCKET/$CKPT billed to $GCP_BILLING_PROJECT:
+$(sed 's/^/       /' "$EXP_DIR/bootstrap/gcs-access-check.err")
+       Check the project id, that billing is enabled on it, and that this account may use it."
+  fi
+  if [[ "$data_present" != "1" ]]; then
+    gsutil -u "$GCP_BILLING_PROJECT" ls "$DATA_BUCKET/val/zarr.json" >/dev/null 2>&1 \
+      || gsutil -u "$GCP_BILLING_PROJECT" ls "$DATA_BUCKET/data.zarr/val/zarr.json" >/dev/null 2>"$EXP_DIR/bootstrap/gcs-access-check.err" \
+      || die "cannot read the books3 /val metadata under $DATA_BUCKET billed to $GCP_BILLING_PROJECT:
+$(sed 's/^/       /' "$EXP_DIR/bootstrap/gcs-access-check.err")"
+  fi
+  echo "    gcs access: checkpoint and /val readable, billed to $GCP_BILLING_PROJECT"
 else
   echo "    gcs       : not needed -- checkpoint and val subset both on local disk"
 fi
@@ -227,6 +243,33 @@ if [[ -n "$(git -C vendor/ttt-e2e status --porcelain)" ]]; then
 fi
 echo "    vendor tree clean (ADR-002)"
 
+# ------------------------------------------------ 1b. download, in background --
+# Billing is per minute, so nothing waits on anything it does not depend on. The
+# GCS download needs neither the vendor env nor the GPU, and `uv sync` needs
+# neither the checkpoint nor the data -- they run side by side, and Step 4 waits.
+FETCH_PID=""
+if [[ "$need_gcs" == "1" ]]; then
+  FETCH_LOG="$EXP_DIR/bootstrap/fetch-$(date -u +%Y%m%dT%H%M%SZ).log"
+  say "Step 1b — GCS download started in the background (log: $FETCH_LOG)"
+  export GCP_BILLING_PROJECT
+  (
+    set -euo pipefail
+    if [[ "$ckpt_present" != "1" ]]; then
+      # fetch_checkpoints.sh probes before transferring and refuses to exceed
+      # MAX_BYTES, so a wrong CKPT name costs a metadata call, not an egress bill.
+      mkdir -p "$(dirname "$CKPT_DEST")"
+      CKPT="$CKPT" BUCKET="$BUCKET" DEST="$CKPT_DEST" RESULTS="$RESULTS" bash scripts/fetch_checkpoints.sh
+    fi
+    if [[ "$data_present" != "1" ]]; then
+      python3 "$repo_root/scripts/make_val_subset.py" --dest "$BOOKS3_LOCAL" fetch --bucket "$DATA_BUCKET" --tokens "$VAL_TOKENS"
+    fi
+  ) > "$FETCH_LOG" 2>&1 &
+  FETCH_PID=$!
+  # If a later step dies (e.g. the GPU check), do not leave a download running.
+  trap '[[ -n "$FETCH_PID" ]] && kill "$FETCH_PID" 2>/dev/null || true' EXIT
+  echo "    watch it from another tmux window:  tail -f $FETCH_LOG"
+fi
+
 # ----------------------------------------------------------- 2. environment --
 # `uv sync --frozen` is itself idempotent; re-running it after a partial install
 # resumes rather than restarting.
@@ -255,14 +298,20 @@ PY
 
 # ------------------------------------------------------------ 4. checkpoint --
 say "Step 4 — checkpoint"
-if [[ "$ckpt_present" == "1" ]]; then
+if [[ -n "$FETCH_PID" ]]; then
+  echo "    waiting for the background download (started in Step 1b)..."
+  if ! wait "$FETCH_PID"; then
+    FETCH_PID=""
+    tail -30 "$FETCH_LOG" | sed 's/^/      | /'
+    die "GCS download failed; full log: $FETCH_LOG
+       Re-running this script resumes it (gsutil cp -n, and fetched chunks are skipped)."
+  fi
+  FETCH_PID=""
+  echo "    download finished"
+elif [[ "$ckpt_present" == "1" ]]; then
   skip "checkpoint present at $CKPT_DEST"
-else
-  # fetch_checkpoints.sh probes before transferring and refuses to exceed
-  # MAX_BYTES, so a wrong CKPT name costs a metadata call rather than an egress bill.
-  mkdir -p "$(dirname "$CKPT_DEST")"
-  CKPT="$CKPT" BUCKET="$BUCKET" DEST="$CKPT_DEST" RESULTS="$RESULTS" bash scripts/fetch_checkpoints.sh
 fi
+[[ -d "$CKPT_DEST" ]] || die "checkpoint directory $CKPT_DEST does not exist"
 
 # orbax's CheckpointManager (ttt/infra/checkpoint.py:97) looks for integer step
 # directories; without one the eval dies at load with "No checkpoints found".
@@ -302,11 +351,11 @@ fi
 say "Step 5 — dataset (books3 /val subset on local disk)"
 if [[ "${SKIP_DATA:-0}" == "1" ]]; then
   echo "    SKIP_DATA=1 -- skipping. The eval will fail without it."
-elif [[ "$data_present" == "1" ]]; then
-  skip "val subset at $BOOKS3_LOCAL covers $VAL_TOKENS tokens"
+elif python3 "$repo_root/scripts/make_val_subset.py" --dest "$BOOKS3_LOCAL" covers --tokens "$VAL_TOKENS"; then
+  echo "    val subset at $BOOKS3_LOCAL covers $VAL_TOKENS tokens"
 else
-  export GCP_BILLING_PROJECT
-  python3 "$repo_root/scripts/make_val_subset.py" --dest "$BOOKS3_LOCAL" fetch --tokens "$VAL_TOKENS"
+  die "val subset at $BOOKS3_LOCAL does not cover VAL_TOKENS=$VAL_TOKENS after the download step.
+       Re-run this script to resume the fetch."
 fi
 
 if [[ "${SKIP_DATA:-0}" != "1" ]]; then
