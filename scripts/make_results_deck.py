@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 R002 = ROOT / "experiments" / "002-pilot-tiny-ttt" / "results"
 OUT_DIR = ROOT / "docs" / "review"
 FIG_DIR = OUT_DIR / "figures"
-DATE = "2026-09-15"
+DATE = "2026-09-16"
 OUT = OUT_DIR / f"TrustGate_Results_{DATE}.pptx"
 
 BLACK = RGBColor(0x00, 0x00, 0x00)
@@ -311,7 +311,8 @@ def build() -> Path:
     s = slide(prs, "Summary")
     y = lines(s, BODY_TOP, [
         ("Done.", "002 complete and reproducible. 003 executes the vendor model. "
-                  "Cost model measured against the live bucket."),
+                  "Cost model measured against the live bucket. Realism bar now "
+                  "scorable; Phase 1 harness runs end to end."),
         ("Not done.", "Kill-gate (001). Fast-weight carry. 1B baseline."),
         ("Verdict.", "None. Nothing here is a PROCEED or a STOP."),
         ("Spend.", "$0.13, one GCS transfer. All compute so far on free hardware."),
@@ -320,7 +321,7 @@ def build() -> Path:
               ["Pre-registered bar", "Value", "Status"],
               [["Cohen's d", "≥ 0.80", "frozen 2026-08-08, untouched"],
                ["Relative degradation", "≥ 10%", "frozen 2026-08-08, untouched"],
-               ["Fluency ratio", "≤ 1.5", "frozen 2026-08-08, not yet scorable"]],
+               ["Fluency ratio", "≤ 1.5", "frozen 2026-08-08, scorable from 2026-09-16"]],
               [3.6, 2.2, 5.0])
 
     # -- 3. experiment 002 --------------------------------------------------
@@ -407,12 +408,35 @@ def build() -> Path:
          "SE 0.0015 nats against a 0.491-nat band, for 1.12 h instead of 7.45. "
          "Fixed in writing before any baseline result is seen.")
 
-    # -- 8. scope -----------------------------------------------------------
+    # -- 8. harness ---------------------------------------------------------
+    s = slide(prs, "Phase 1 harness — executable end to end")
+    y = lines(s, BODY_TOP, [
+        ("Fluency reference.", "GPT-2 small. Independent of the victim on "
+                               "corpus, tokenizer, and the fact that it does "
+                               "not adapt at inference."),
+        ("Spike entry point.", "Refused every real run until today. Now runs "
+                               "against a victim built with no weights."),
+    ], size=16, gap=8)
+    y = table(s, y + Inches(0.20),
+              ["Check", "Observed", "Bar"],
+              [["Reference discrimination, fluent vs scrambled", "66.4×", "> 2×"],
+               ["Logit equivalence vs reference implementation", "5.798e-04",
+                "< 1e-03"],
+               ["Argmax agreement, sequence 1 to 1024", "100%", "—"],
+               ["CPU test suite", "319 passing", "was 281"]],
+              [5.4, 2.4, 3.2])
+    note(s, y + Inches(0.04),
+         "The realism bar was frozen on 2026-08-08 and recorded as not yet "
+         "scorable. It is now scorable. The bar did not move. A weightless "
+         "victim has nothing to corrupt, so the harness run it enables renders "
+         "no verdict and its report says so above the verdict line.")
+
+    # -- 9. scope -----------------------------------------------------------
     s = slide(prs, "Not established")
     y = lines(s, BODY_TOP, [
         ("No kill-gate verdict.", "001 not run. PREREGISTERED.md untouched."),
-        ("No fast-weight carry result.", "Blocked on GPU memory; 8 GB card is "
-                                         "~2 GB short."),
+        ("No fast-weight carry result.", "8 GB card is ~2 GB short. L4 24 GB "
+                                         "procured; not yet run."),
         ("No 1B baseline.", "Needs rented Ampere. Kaggle and Colab excluded — "
                             "cuDNN fused attention requires SM80+."),
         ("002 is not TTT-E2E.", "0.1M-parameter stand-in, realism bar unscored, "
@@ -427,15 +451,21 @@ def build() -> Path:
     s = slide(prs, "Next")
     y = table(s, BODY_TOP,
               ["Step", "Requires", "Cost"],
-              [["1. Fast-weight carry (003)", "Ampere GPU, ~16 GB", "~1 h"],
-               ["2. 125M rehearsal", "checkpoint already fetched", "~0.5 h"],
-               ["3. 1B baseline vs 2.314–2.805", "3 /val chunks, rented A100",
-                "≈ 4 h, ≈ ₹560"],
-               ["4. Kill-gate (001)", "all of the above", "separate session"]],
+              [["1. Fast-weight carry (003)", "L4 24 GB, no checkpoint",
+                "~1 h, ≈ ₹50"],
+               ["2. Harness wiring run, 001 path", "same session, no checkpoint",
+                "~0.5 h, ≈ ₹25"],
+               ["3. 125M rehearsal", "checkpoint already fetched", "~0.5 h"],
+               ["4. 1B baseline vs 2.314–2.805", "3 /val chunks, A100 80 GB",
+                "≈ 4 h, ≈ ₹740"],
+               ["5. Kill-gate (001)", "all of the above", "separate session"]],
               [4.4, 4.0, 2.9])
     note(s, y + Inches(0.06),
-         "Step 1 retires the project's named principal technical risk. Step 4 "
-         "must be read against the 15% false-positive rate above.")
+         "Step 1 retires the project's named principal technical risk; step 2 "
+         "leaves weights as the only missing input. Step 4 is costed at 80 GB, "
+         "not 40: the eval batch is floored at 8 independently of "
+         "global_batch_size, which the earlier 40 GB estimate did not carry. "
+         "Step 5 must be read against the 15% false-positive rate above.")
 
     try:
         prs.save(OUT)
