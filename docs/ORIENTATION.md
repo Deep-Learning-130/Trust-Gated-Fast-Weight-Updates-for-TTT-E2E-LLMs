@@ -1,6 +1,7 @@
 # TrustGate — orientation for a first-time reader
 
-**Written 2026-09-15.** This document assumes you know what a language model is and
+**Written 2026-09-15. Revised 2026-09-16** (§8, §9, §10.4, §10.5, §11). This document
+assumes you know what a language model is and
 nothing else about this project. It explains the idea, defines every term the
 repository uses, describes what has actually been built and measured, and is explicit
 about what has *not*.
@@ -401,7 +402,7 @@ TTT/
 │   └── audit/                 decision logging                         [built]
 │
 ├── experiments/           see §8
-├── tests/                 197 tests, CPU only, no vendor code required
+├── tests/                 319 tests, CPU only, no vendor code required
 ├── scripts/               setup, cost probes, figures, the demo, the deck
 └── vendor/ttt-e2e/        upstream source — READ ONLY, never edited
 ```
@@ -437,6 +438,16 @@ nats/token, fixed in [`TOLERANCE.md`](../experiments/000-repro-baseline/TOLERANC
 `FLUENCY_REFERENCE.md`. There is **no `results/` directory**, and that absence is the
 honest state of the project.
 
+What changed on **2026-09-16** is that the path is now executable. Until then
+[`trustgate.eval.cli`](../src/trustgate/eval/cli.py) refused every invocation that was
+not a dry run, because nothing joined the model builder to the harness. It now accepts
+`--random-init`, which builds a victim with no checkpoint and exercises every seam the
+real run would: stream crafting, the five-seed loop, run-condition matching, carry
+threading, fluency scoring and report generation. A model with no weights has learned
+nothing, so it has nothing worth corrupting, and the report it produces carries a
+`NOT A RESULT` banner **above** the verdict line rather than below it. The only missing
+input to a real run is now the weights themselves.
+
 ### 002 — Scaled-down pilot
 
 **Purpose:** the Phase 1 machinery had been implemented and unit-tested for a month but
@@ -465,7 +476,8 @@ measurement — a randomly initialised model's fast weights have nothing worth c
 **Status:** partially complete. The upstream model executes; seven distinct first-launch
 failures were found and fixed, which is exactly the value this tier exists to produce.
 The final check — "the carry is non-trivial" — is blocked: an 8 GB consumer card is
-roughly 2 GB short.
+roughly 2 GB short. An **L4 24 GB** has since been procured on E2E Networks and is not
+yet run.
 
 ---
 
@@ -474,15 +486,19 @@ roughly 2 GB short.
 | | Status |
 |---|---|
 | Phase 0–1 scaffold | Complete |
-| Phase 1 CPU implementation | Complete — 197 tests passing |
-| Fluency reference model | Complete |
+| Phase 1 CPU implementation | Complete, 473 tests passing |
+| Fluency reference model | Complete 2026-08-27, verified against HuggingFace GPT-2 |
+| Phase 1 spike, runnable end to end | Complete 2026-09-16, against a weightless victim |
+| Cost model, probed against the live bucket | Complete 2026-09-14 |
 | Continuous integration | Complete |
 | 002 pilot | Complete and reproducible |
 | 003 smoke — upstream model executes | Complete |
-| 003 smoke — carry verified non-trivial | **Blocked on GPU memory** |
+| 003 smoke, carry verified non-trivial | **Blocked on GPU memory.** An L4 24 GB is procured and not yet run. |
+| Checkpoint loading | Complete 2026-09-20. Refuses a partial restore rather than warning. |
+| Real attacker wired to the CLI | Complete 2026-09-20. `search_order` had been implemented and connected to nothing. |
 | 000 baseline reproduction | Not run |
 | **001 kill gate** | **Not run** |
-| Trust gate implementation (Phase 2) | **Deliberately forbidden** until 001 returns PROCEED |
+| Trust gate implementation (Phase 2) | Anchor, uncertainty, policy and probe rotation implemented 2026-09-20 **before the verdict**, per a dated revision to `PREREGISTERED.md`. Bounded drift is **not enforced** (ADR-003 correction, ADR-P3-1). |
 | **Verdict** | **None** |
 | **Total spend** | **$0.13** |
 
@@ -492,12 +508,25 @@ stream builders, the run-condition matching discipline, the three frozen bars as
 constants with a CI test that parses `PREREGISTERED.md` and asserts equality, the report
 generator, the fast-weight carry overlay, and the fluency reference model.
 
-**Deliberately empty:** everything in `gate/`, the rotating probe set, and the MedBN
-comparison baseline. Each is a documented stub naming what it must do and why it is not
-done yet.
+**Deliberately empty:** `gate/influence.py`, which ADR-F1 keeps offline by design, and the
+MedBN comparison baseline, which needs per-example gradients the vendor's `inner_loop_step`
+does not produce and which `medbn-diff.md` requires be tuned as hard as our own gate. Both
+remain documented stubs naming what they must do and why they are not done.
+
+**Built before the evidence that would justify it:** the gate. The owner decided on
+2026-09-20 to build Phase 2 without waiting for the 001 verdict, and
+`PREREGISTERED.md` carries the dated revision recording who decided, why, and what it
+costs if the verdict is STOP. The design values inside `gate/` are pre-verdict guesses
+labelled as such in code; they are not findings.
 
 **The single remaining technical risk** is binding the carry overlay to the real upstream
 model. Everything downstream of that is written and tested.
+
+**The largest untested assumption** is cost, not correctness. One ordering-search proposal
+is one full adapt-and-eval -- roughly 16 inner steps plus 2 prefix passes at 8192/1024 --
+and `--max-iters` multiplies that by five seeds. Measure a single evaluation on the box
+before choosing the budget; `run_deep.py`'s value of 40 was picked on CPU against a tiny
+model and does not transfer.
 
 ---
 
@@ -543,6 +572,43 @@ result.
 
 This one has the most far-reaching consequences, and it is explained in §11.
 
+### 10.4 The validation split is twice the largest figure the plan allowed for
+
+[`COST_MODEL.md`](../experiments/000-repro-baseline/COST_MODEL.md) §2.2 had budgeted a
+`/val` split of 50M to 1B tokens. A free probe of the live bucket on **2026-09-14**
+measured **2,000,168,321 tokens, 8.4 GB, uncompressed**, and flagged itself
+`OUT_OF_BAND`. At §3's interpolated 1B rate that turns one evaluation pass into roughly
+**7.5 GPU-hours**, and TOLERANCE.md's bar S2 requires the identical command run twice.
+A full-`/val` baseline is therefore a fifteen-hour job. It collides with the project's
+own 12-GPU-hour stop rule and does not fit inside a single booking.
+
+What makes it recoverable is that the number of evaluation batches is not configuration
+at all. `ttt/dataloader/lm_dataset.py:27` derives it from the zarr array's declared
+**shape**, so copying K chunks and rewriting `shape` in our own local `val/zarr.json`
+bounds the pass exactly, without touching the vendor tree and so without engaging
+[ADR-002](adr/ADR-002-overlay-vs-fork.md). The re-plan is `COST_MODEL.md` §8.1, the tool
+is [`scripts/make_val_subset.py`](../scripts/make_val_subset.py), and the subset actually
+used is recorded per run in `val-subset-manifest.json`.
+
+The trap it guards is worth naming. Absent zarr chunks read as the **fill value** rather
+than raising, so a declared shape larger than the chunks on disk evaluates the model on
+padding and returns a confident, meaningless loss with no error anywhere. Nothing else
+in the stack would catch that, which is why `reshape` refuses it by default.
+
+### 10.5 The evaluation batch is 8 whatever the configuration says
+
+`COST_MODEL.md` §9.4 had sized the 1B baseline around an evaluation batch of 1 and
+concluded that a 40 GB card might be enough. `train.py:211` takes
+`max(eval_batch_size, global_batch_size // accum_steps * 4)`, which floors the batch at
+**8** however low `global_batch_size` is set. Eight chunks of `[1024, 128256]` logits,
+cast to fp32 *before* the log-softmax at `loss.py:18`, is where the memory actually goes.
+
+The corrected estimate is **36 to 49 GB**, which straddles 40 GB where the old figure sat
+comfortably below it, so the recommendation moves to **80 GB**. That is the difference
+between a session that runs and a session that pays for an out-of-memory error, and it
+was found by reading the source rather than by renting the card. Recorded as
+`COST_MODEL.md` §9.4.1.
+
 ---
 
 ## 11. How to read the numbers
@@ -556,6 +622,22 @@ observations about the *instrument*.
 |---|---|---|
 | Shallow pilot | **+0.872** | noise floor **0.964** |
 | Deep pilot (meta-trained base, hill-climbing attacker) | **−0.003** | 0th percentile of its own null |
+
+> **Both deep-run figures in that row are stale as of 2026-09-16, and are left standing
+> rather than quietly edited.** They come from `results/null.json`, and
+> `run_null.py:142` snapshots them out of `results/deep.json` at the moment the null
+> study runs. `deep.json` has since been regenerated and now reports **+0.122**, against
+> a noise floor of **+0.225** from the same measurement. Recomputing the percentile
+> against the current value places the deep run at the **5th** percentile of its own null
+> rather than the 0th, which is 1 draw in 20 instead of 0. Note also that the percentile
+> compares a *signed* observed value against *absolute* null draws, so a negative observed
+> value can only ever score 0.
+>
+> **The null distribution itself is unaffected.** Its draws are control against control
+> and never read `deep.json`, so the false-positive rate, the median, the maximum and the
+> 90th percentile below all stand. The remedy is to re-run `run_null.py`, which reads the
+> current file. These result files are git-ignored, which is how the two drifted apart
+> without a diff to show for it.
 
 The shallow number clears the pre-registered 0.8 bar. **It is not a detection.** The
 control-vs-control noise floor — printed by the experiment itself, not added afterwards —
@@ -593,7 +675,7 @@ about the instrument. Any revision of the bar must be a written, dated decision 
 ### The instrument does work
 
 One number confirms the apparatus has real sensitivity: inner-loop adaptation gain is
-**0.1532 nats** on the deep run versus **0.0007 nats** on the shallow one. The
+**0.1114 nats** on the deep run versus **0.0007 nats** on the shallow one. The
 meta-trained model genuinely learns from its context. So the deep run's *d* = −0.003 is
 not a broken measurement returning zero — it is a working measurement reporting that,
 in this scaled-down setting, **there was nothing there to find**.
@@ -643,7 +725,7 @@ Reading the repository without these will make several choices look arbitrary.
 | Why the upstream carry problem matters | [`docs/adr/ADR-006-fast-weight-carry.md`](adr/ADR-006-fast-weight-carry.md) |
 | What the pilot does and does not claim | [`experiments/002-pilot-tiny-ttt/README.md`](../experiments/002-pilot-tiny-ttt/README.md) |
 | A progress report written for someone who already knows the project | [`docs/report.md`](report.md) |
-| A slide deck for a review panel | `docs/review/TrustGate_Results_2026-09-15.pptx` |
+| A slide deck for a review panel | `docs/review/TrustGate_Results_2026-09-16.pptx` |
 
 ### Run it yourself
 
