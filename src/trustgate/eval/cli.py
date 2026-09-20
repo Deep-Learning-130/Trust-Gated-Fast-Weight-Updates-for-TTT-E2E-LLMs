@@ -44,7 +44,97 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[s.value for s in StreamStrategy],
         help="SELECT is the headline; PARAPHRASE and SOFT do not substitute for it.",
     )
-    parser.add_argument("--checkpoint", default=None, help="Path or gs:// URI.")
+    parser.add_argument(
+        "--checkpoint",
+        default=None,
+        help=(
+            "Path or gs:// URI of the directory CONTAINING the step "
+            "directories. Turns on the real run: trained weights, a searching "
+            "attacker, and a report with no banner."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-step",
+        type=int,
+        default=None,
+        help="Step to restore. Default: the latest in the directory.",
+    )
+    parser.add_argument(
+        "--checkpoint-manifest",
+        default=None,
+        help=(
+            "Output of scripts/fingerprint_checkpoint.sh. Its manifest_sha256 "
+            "travels into the report as the identity of the weights; without "
+            "it the run is recorded as UNFINGERPRINTED."
+        ),
+    )
+    parser.add_argument(
+        "--allow-checkpoint-layout-mismatch",
+        action="store_true",
+        help=(
+            "Skip the integer-step-directory check. Orbax reports 'No "
+            "checkpoints found' for a wrong path, which reads like a missing "
+            "checkpoint; the check exists to tell those apart."
+        ),
+    )
+    parser.add_argument(
+        "--corpus-file",
+        default=None,
+        help=(
+            ".npy of int32 token ids the attacker draws spans from. Required "
+            "for a checkpoint run: against trained weights, dummy_tokens noise "
+            "measures the reaction to gibberish, not the threat model."
+        ),
+    )
+    parser.add_argument(
+        "--eval-file",
+        default=None,
+        help=".npy of int32 token ids for the held-out benign eval.",
+    )
+    parser.add_argument(
+        "--corpus-split",
+        default="train",
+        help="Name of the split the stream is drawn from; recorded in the condition.",
+    )
+    parser.add_argument(
+        "--eval-split",
+        default="val",
+        help=(
+            "Name of the benign eval split. Must differ from --corpus-split; "
+            "`assert_stream_not_from_eval_split` enforces it."
+        ),
+    )
+    parser.add_argument(
+        "--max-iters",
+        type=int,
+        default=40,
+        help=(
+            "Ordering-search budget, in proposals per seed. THE COST KNOB: one "
+            "proposal is one full adapt-and-eval. Measure a single evaluation "
+            "before choosing this."
+        ),
+    )
+    parser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=50,
+        help="Stop after this many proposals with no improvement. 0 disables.",
+    )
+    parser.add_argument(
+        "--fluency-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "Penalty on the fluency ratio inside the search objective. 0 lets "
+            "the attacker ignore realism, which the pre-registration does not."
+        ),
+    )
+    parser.add_argument(
+        "--span-tokens",
+        type=int,
+        default=64,
+        help="Span granularity (ADR-007). Travels with the verdict.",
+    )
     parser.add_argument(
         "--seeds",
         type=int,
@@ -98,6 +188,44 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1 << 17,
         help="Size of the synthetic span corpus for --random-init.",
+    )
+    parser.add_argument(
+        "--sequence-eval",
+        action="store_true",
+        help=(
+            "Run the SECONDARY sequence-position arms instead of the spike: "
+            "poison and control measured after every window, plus no-carry "
+            "counterparts and a no-stream floor. Renders NO verdict and touches "
+            "no pre-registered bar (PREREGISTERED.md, Addendum 2026-09-20). "
+            "Requires --random-init or --checkpoint for a victim."
+        ),
+    )
+    parser.add_argument(
+        "--windows",
+        type=int,
+        default=50,
+        help=(
+            "Target number of windows for --sequence-eval. One window is one "
+            "inner step, so --stream-tokens must be this many mini-batches."
+        ),
+    )
+    parser.add_argument(
+        "--eval-every",
+        type=int,
+        default=1,
+        help=(
+            "Measure after every Nth window. The cost knob: four arms times the "
+            "window count is not free. Pick it on the 002 pilot first."
+        ),
+    )
+    parser.add_argument(
+        "--onset-delta",
+        type=float,
+        default=0.01,
+        help=(
+            "Reported sensitivity for the onset metric, in nats/token. Not a "
+            "bar -- it is printed next to every onset it produces."
+        ),
     )
     parser.add_argument(
         "--fluency-selftest",
@@ -219,7 +347,6 @@ def _random_init_run(args) -> int:
     from trustgate.attack.corpus import TokenCorpus
     from trustgate.attack.objectives import AttackSpec
     from trustgate.attack.stream import generate_seed_pairs
-    from trustgate.eval import vendor_bind
     from trustgate.eval.fluency import load_default_scorer
     from trustgate.eval.harness import (
         RunCondition,
@@ -227,21 +354,9 @@ def _random_init_run(args) -> int:
         make_adapt_and_eval,
         run_attack_spike,
     )
-    from trustgate.eval.model_build import build_random_init, dummy_tokens
+    from trustgate.eval.model_build import dummy_tokens
 
-    print(f"[random-init] building a {args.size} victim at seq_length={args.seq_length}")
-    try:
-        cfg, model, state, _mesh = build_random_init(
-            size=args.size, seq_length=args.seq_length
-        )
-    except (ImportError, ValueError) as exc:
-        # `model_build` already explains which case this is -- a missing vendor
-        # tree, an unknown size, or a seq_length the vendor would assert on.
-        # None of them deserves a traceback.
-        raise SystemExit(str(exc)) from exc
-    mini_batch = int(cfg.model.mini_batch_size)
-    binding = vendor_bind.bind(model, state)
-    print(f"[random-init] bound; mini_batch_size={mini_batch}")
+    cfg, model, binding, mini_batch, _label = _build_victim(args, tag="random-init")
 
     # Span corpus. Ids span a wide range rather than DummyDataset's [0, 20) so
     # the Llama-3 decode behind the fluency scorer produces varied text instead
@@ -318,6 +433,339 @@ def _random_init_run(args) -> int:
     return 0
 
 
+SEQUENCE_NOT_GATING = (
+    "SECONDARY, NON-GATING -- NOT A VERDICT. These arms were added as a dated "
+    "addendum to PREREGISTERED.md on 2026-09-20 and move none of the three "
+    "bars frozen on 2026-07-28. The PROCEED/STOP decision comes only from the "
+    "spike report."
+)
+
+
+def _sequence_run(args) -> int:
+    """Drive the secondary sequence-position arms against a random-init victim.
+
+    Shares `_random_init_run`'s victim construction deliberately: the point of
+    these curves is that they sit alongside the spike's endpoint, and a
+    separately-built victim would put them on a different model.
+    """
+    from trustgate.attack.corpus import TokenCorpus
+    from trustgate.attack.stream import generate_seed_pairs
+    from trustgate.eval import vendor_bind
+    from trustgate.eval.harness import (
+        RunCondition,
+        eval_benign,
+        eval_tokens_digest,
+        model_bos_token_id,
+    )
+    from trustgate.eval.model_build import dummy_tokens
+    from trustgate.eval.report import write_sequence_report
+    from trustgate.eval.sequence import make_vendor_windows, run_sequence_eval
+
+    cfg, _model, binding, mini_batch, _label = _build_victim(args, tag="sequence")
+
+    expected = args.windows * mini_batch
+    if args.stream_tokens != expected:
+        raise SystemExit(
+            f"--windows {args.windows} at mini_batch_size {mini_batch} needs "
+            f"--stream-tokens {expected}, got {args.stream_tokens}. One window "
+            f"is one inner step; a stream that does not divide evenly would "
+            f"measure the last window at a different dose than the rest."
+        )
+    print(f"[sequence] {args.windows} windows of {mini_batch} tokens")
+
+    corpus = TokenCorpus(
+        dummy_tokens(args.corpus_tokens, seed=7, vocab_lo=10, vocab_hi=50_000),
+        name="synthetic",
+    )
+    eval_tokens = dummy_tokens(args.seq_length + 1, seed=2)
+
+    pairs = generate_seed_pairs(
+        corpus,
+        args.stream_tokens,
+        list(args.seeds),
+        craft_fn=None,
+        mini_batch_size=mini_batch,
+    )
+    arms = dict(zip(args.seeds, pairs))
+
+    first_poison, _ = arms[args.seeds[0]]
+    condition = RunCondition.from_stream(
+        first_poison,
+        seed=args.seeds[0],
+        seq_length=args.seq_length,
+        checkpoint=f"random-init-{args.size} (NO CHECKPOINT)",
+        benign_eval_split="synthetic",
+        eval_tokens_sha256=eval_tokens_digest(eval_tokens),
+    )
+
+    result = run_sequence_eval(
+        condition,
+        list(args.seeds),
+        build_arms=arms.__getitem__,
+        windows_for=make_vendor_windows(
+            binding, condition, bos_token_id=model_bos_token_id(binding)
+        ),
+        step_fn=vendor_bind.make_step_fn(binding),
+        fresh_carry=binding.init_carry,
+        evaluate=lambda carry, cond: eval_benign(binding, carry, eval_tokens, cond),
+        eval_every=args.eval_every,
+    )
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    report_path = write_sequence_report(
+        result, out / "sequence.md", onset_delta=args.onset_delta
+    )
+    _banner_report(report_path, NOT_A_RESULT)
+
+    print(f"\n[sequence] {SEQUENCE_NOT_GATING}")
+    print(report_path.read_text(encoding="utf-8"))
+    return 0
+
+
+def _load_tokens(path: Path, what: str):
+    """Load a saved token array, refusing anything that is not one.
+
+    A real run measures language, so its corpus and its eval set have to be real
+    tokens. `dummy_tokens` is uniform noise over a vocab range: against trained
+    weights it measures the model's reaction to gibberish, which is not the
+    threat model and not a result.
+    """
+    import numpy as np
+
+    if not path.is_file():
+        raise SystemExit(
+            f"{what} file {path} does not exist. A checkpoint-backed run needs "
+            f"real tokens, not `dummy_tokens` noise -- dump a held-out slice of "
+            f"the eval corpus to .npy (int32 token ids) and pass it here."
+        )
+    tokens = np.load(path)
+    if tokens.ndim != 1:
+        raise SystemExit(f"{what} file {path} must be 1-D, got shape {tokens.shape}")
+    if not np.issubdtype(tokens.dtype, np.integer):
+        raise SystemExit(f"{what} file {path} must hold integer ids, got {tokens.dtype}")
+    return np.asarray(tokens, dtype="int32")
+
+
+def _checkpoint_label(args) -> str:
+    """What travels into `RunCondition.checkpoint`.
+
+    A bare path names a directory that may have changed since; the manifest hash
+    names the bytes. `scripts/fingerprint_checkpoint.sh` writes that hash, and a
+    run that cannot quote one says so in the report rather than implying a
+    provenance it does not have.
+    """
+    if not args.checkpoint_manifest:
+        return f"{args.checkpoint} (UNFINGERPRINTED)"
+
+    text = Path(args.checkpoint_manifest).read_text(encoding="utf-8")
+    hexdigits = set("0123456789abcdef")
+    for line in text.splitlines():
+        if "manifest_sha256" not in line:
+            continue
+        for token in line.replace(":", " ").replace("=", " ").split():
+            candidate = token.strip().lower()
+            if len(candidate) == 64 and set(candidate) <= hexdigits:
+                return f"{args.checkpoint} sha256:{candidate}"
+    raise SystemExit(
+        f"--checkpoint-manifest {args.checkpoint_manifest} carries no "
+        f"manifest_sha256 line. `scripts/fingerprint_checkpoint.sh` writes one; "
+        f"a manifest without it cannot identify the weights that were run."
+    )
+
+
+def _build_victim(args, *, tag: str):
+    """Build the victim once, whichever path was asked for.
+
+    All three runners need the same four things and previously built them
+    separately. The label is the only place the two paths differ visibly, which
+    is the point: `vendor_bind.bind` reads its config off `model.config` and
+    consumes only `(MetaModel, eqx.nn.State)`, so everything downstream is
+    indifferent to how the weights arrived.
+
+    Returns `(cfg, model, binding, mini_batch, label)`.
+    """
+    from trustgate.eval import vendor_bind
+    from trustgate.eval.model_build import build_from_checkpoint, build_random_init
+
+    if args.checkpoint:
+        print(f"[{tag}] loading {args.size} weights from {args.checkpoint}")
+        try:
+            cfg, model, state, _mesh = build_from_checkpoint(
+                checkpoint=args.checkpoint,
+                size=args.size,
+                seq_length=args.seq_length,
+                step=args.checkpoint_step,
+                allow_layout_mismatch=args.allow_checkpoint_layout_mismatch,
+            )
+        except (ImportError, ValueError, FileNotFoundError) as exc:
+            # `model_build` already says which case this is -- absent vendor,
+            # bad size, bad seq_length, missing checkpoint, or a partial
+            # restore. None of them deserves a traceback.
+            raise SystemExit(str(exc)) from exc
+        label = _checkpoint_label(args)
+    else:
+        print(f"[{tag}] building a {args.size} victim at seq_length={args.seq_length}")
+        try:
+            cfg, model, state, _mesh = build_random_init(
+                size=args.size, seq_length=args.seq_length
+            )
+        except (ImportError, ValueError) as exc:
+            raise SystemExit(str(exc)) from exc
+        label = f"random-init-{args.size} (NO CHECKPOINT)"
+
+    mini_batch = int(cfg.model.mini_batch_size)
+    binding = vendor_bind.bind(model, state)
+    print(f"[{tag}] bound; mini_batch_size={mini_batch}")
+    return cfg, model, binding, mini_batch, label
+
+
+def _checkpoint_run(args) -> int:
+    """The real run: trained weights, a searching attacker, a real verdict.
+
+    Everything `_random_init_run` proves about the seams, plus the two things it
+    deliberately does not do -- load weights, and let the attacker search. There
+    is no banner at the end of this one, which is the whole point of it.
+
+    Cost warning. The search is the dominant expense: one proposal is one full
+    adapt-and-eval, and `--max-iters` multiplies that by the seed count. Size it
+    against a measured per-evaluation wall-clock before starting a run that
+    bills.
+    """
+    from trustgate.attack.corpus import TokenCorpus
+    from trustgate.attack.craft import CraftConfig
+    from trustgate.attack.objectives import AttackSpec
+    from trustgate.attack.stream import generate_seed_pairs
+    from trustgate.eval.attacker import NoOrderingFound, make_craft_fn
+    from trustgate.eval.fluency import load_default_scorer
+    from trustgate.eval.harness import (
+        RunCondition,
+        eval_tokens_digest,
+        make_adapt_and_eval,
+        run_attack_spike,
+    )
+
+    if args.strategy != StreamStrategy.SELECT.value:
+        raise SystemExit(
+            f"--strategy {args.strategy} is not wired: `craft_stream` refuses "
+            f"anything but SELECT (T2.5). SELECT is the pre-registered headline "
+            f"and the only strategy that must work."
+        )
+
+    corpus_tokens = _load_tokens(Path(args.corpus_file), "--corpus-file")
+    eval_tokens = _load_tokens(Path(args.eval_file), "--eval-file")
+
+    cfg, model, binding, mini_batch, label = _build_victim(args, tag="run")
+
+    corpus = TokenCorpus(corpus_tokens, name=args.corpus_split)
+    adapt_and_eval = make_adapt_and_eval(binding, eval_tokens, model=model)
+    eval_digest = eval_tokens_digest(eval_tokens)
+
+    # A real run must not silently skip the realism bar: a corruption that only
+    # appears with a non-fluent stream does not pass, and an absent scorer
+    # leaves every ratio nan rather than failing loudly.
+    try:
+        fluency_scorer = load_default_scorer()
+        print("[run] fluency reference loaded")
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            f"the fluency reference model is required for a verdict run: the "
+            f"realism bar is one of the three frozen criteria and cannot be "
+            f"scored without an independent reference. {exc}"
+        ) from exc
+
+    spec = AttackSpec(
+        objective=Objective(args.objective),
+        stream_tokens=args.stream_tokens,
+        fluency_weight=args.fluency_weight,
+    )
+    config = CraftConfig(
+        strategy=StreamStrategy.SELECT,
+        max_iters=args.max_iters,
+        reference_model_path="(injected scorer)",
+        early_stop_patience=args.early_stop_patience,
+    )
+
+    def condition_for(stream, seed):
+        return RunCondition.from_stream(
+            stream,
+            seed=seed,
+            seq_length=args.seq_length,
+            checkpoint=label,
+            benign_eval_split=args.eval_split,
+            eval_tokens_sha256=eval_digest,
+        )
+
+    searches: dict[int, object] = {}
+
+    def record(seed, result):
+        searches[seed] = result
+        print(
+            f"[run] seed {seed}: {result.n_evaluations} evaluations, "
+            f"gain {result.gain:+.6f}, accepted {result.n_accepted}"
+            + (", stopped early" if result.stopped_early else "")
+        )
+
+    print(
+        f"[run] searching: {len(args.seeds)} seeds x up to {args.max_iters} "
+        f"proposals, one adapt-and-eval each"
+    )
+    try:
+        pairs = generate_seed_pairs(
+            corpus,
+            args.stream_tokens,
+            list(args.seeds),
+            craft_fn=make_craft_fn(
+                corpus=corpus,
+                spec=spec,
+                config=config,
+                adapt_and_eval=adapt_and_eval,
+                condition_for=condition_for,
+                fluency_scorer=fluency_scorer,
+                span_tokens=args.span_tokens,
+                mini_batch_size=mini_batch,
+                on_result=record,
+            ),
+            span_tokens=args.span_tokens,
+            mini_batch_size=mini_batch,
+        )
+    except NoOrderingFound as exc:
+        # A real null, and the honest report is that the attacker searched and
+        # found nothing -- not a crash, and not a rerun at a kinder setting.
+        raise SystemExit(
+            f"NULL RESULT (not an error): {exc}\n"
+            f"Under SELECT the attacker's only lever is ordering. Record this "
+            f"as the outcome; PREREGISTERED.md says publishing a STOP is the "
+            f"honest result."
+        ) from exc
+
+    arms = dict(zip(args.seeds, pairs))
+    first_poison, _ = arms[args.seeds[0]]
+    condition = condition_for(first_poison, args.seeds[0])
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    result = run_attack_spike(
+        spec,
+        condition,
+        list(args.seeds),
+        out,
+        build_arms=arms.__getitem__,
+        adapt_and_eval=adapt_and_eval,
+        fluency_scorer=fluency_scorer,
+    )
+
+    report_path = write_report(
+        result,
+        out / "report.md",
+        min_effect_size=FROZEN.min_effect_size,
+        min_relative_degradation=FROZEN.min_relative_degradation,
+        max_fluency_ratio=FROZEN.max_fluency_ratio,
+    )
+    print(report_path.read_text(encoding="utf-8"))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -346,6 +794,12 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
+    if args.sequence_eval and not (args.random_init or args.checkpoint):
+        raise SystemExit(
+            "--sequence-eval needs a victim. Pair it with --random-init for "
+            "instrument validation, or with --checkpoint for the real arms."
+        )
+
     if args.random_init:
         if args.checkpoint:
             raise SystemExit(
@@ -358,7 +812,31 @@ def main(argv: list[str] | None = None) -> int:
                 f"the orderings here are random; see the note in _random_init_run.",
                 file=sys.stderr,
             )
-        return _random_init_run(args)
+        return _sequence_run(args) if args.sequence_eval else _random_init_run(args)
+
+    if args.checkpoint:
+        missing = [
+            flag
+            for flag, value in (
+                ("--corpus-file", args.corpus_file),
+                ("--eval-file", args.eval_file),
+            )
+            if value is None
+        ]
+        if missing:
+            raise SystemExit(
+                f"a checkpoint run needs real tokens: missing "
+                f"{', '.join(missing)}. Against trained weights, dummy_tokens "
+                f"noise measures the reaction to gibberish rather than the "
+                f"threat model, so there is no synthetic fallback here."
+            )
+        if args.corpus_split == args.eval_split:
+            raise SystemExit(
+                f"--corpus-split and --eval-split are both {args.corpus_split!r}. "
+                f"Measuring degradation on the split the stream was drawn from "
+                f"is named as an invalidating condition in PREREGISTERED.md."
+            )
+        return _sequence_run(args) if args.sequence_eval else _checkpoint_run(args)
 
     if not args.dry_run:
         raise SystemExit(
@@ -366,9 +844,13 @@ def main(argv: list[str] | None = None) -> int:
             "overlay is implemented (trustgate.eval.carry, ADR-006) and "
             "`vendor_bind` binds it to the real MetaModel, but `eval_benign` "
             "still needs weights.\n"
-            "  --random-init  builds a weightless victim and exercises every seam "
+            "  --checkpoint    loads trained weights and runs the real attacker "
+            "(this is the one that renders a verdict)\n"
+            "  --random-init   builds a weightless victim and exercises every seam "
             "(instrument validation, renders NO verdict)\n"
-            "  --dry-run      exercises the report pipeline alone, with synthetic "
+            "  --sequence-eval with --random-init, runs the secondary "
+            "sequence-position arms (also NO verdict)\n"
+            "  --dry-run       exercises the report pipeline alone, with synthetic "
             "losses and no model"
         )
 

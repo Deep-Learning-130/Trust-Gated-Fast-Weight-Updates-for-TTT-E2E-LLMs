@@ -158,3 +158,179 @@ def test_defaults_match_the_pre_registered_granularity():
     assert args.seeds == [0, 1, 2, 3, 4]
     assert args.random_init is False
     assert args.dry_run is False
+
+
+# ------------------------------------------------------ sequence-position ---
+
+
+def test_sequence_eval_without_a_victim_is_refused(tmp_path):
+    code, message = run([*BASE, "--out", str(tmp_path), "--sequence-eval"])
+    assert code is None
+    assert "needs a victim" in message
+
+
+def test_the_no_victim_refusal_names_the_sequence_escape_hatch(tmp_path):
+    """The refusal enumerates the ways to run something; keep it complete.
+
+    A mode that exists but is absent from this message is a mode nobody finds.
+    """
+    _code, message = run([*BASE, "--out", str(tmp_path)])
+    assert "--sequence-eval" in message
+
+
+def test_sequence_defaults_are_the_fifty_windows_the_design_asks_for():
+    args = cli.build_parser().parse_args([*BASE, "--out", "/tmp/x"])
+    assert args.sequence_eval is False
+    assert args.windows == 50
+    assert args.eval_every == 1
+
+
+# ------------------------------------------------------- checkpoint runs ---
+
+
+def _ckpt_argv(tmp_path, **overrides):
+    import numpy as np
+
+    ckpt = tmp_path / "ckpt"
+    (ckpt / "12000").mkdir(parents=True, exist_ok=True)
+    for name in ("corpus.npy", "eval.npy"):
+        if not (tmp_path / name).exists():
+            np.save(tmp_path / name, np.arange(4096, dtype=np.int32) % 40_000)
+    argv = {
+        "--objective": "degrade",
+        "--strategy": "select",
+        "--checkpoint": str(ckpt),
+        "--corpus-file": str(tmp_path / "corpus.npy"),
+        "--eval-file": str(tmp_path / "eval.npy"),
+        "--out": str(tmp_path / "out"),
+    }
+    argv.update(overrides)
+    flat = []
+    for flag, value in argv.items():
+        if value is not None:
+            flat += [flag, value]
+    return flat
+
+
+def test_a_checkpoint_run_refuses_to_fall_back_to_synthetic_tokens(tmp_path):
+    """Against trained weights, `dummy_tokens` noise measures the reaction to
+    gibberish. There is deliberately no synthetic fallback on this path."""
+    argv = _ckpt_argv(tmp_path, **{"--corpus-file": None, "--eval-file": None})
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(argv)
+    message = str(excinfo.value)
+    assert "--corpus-file" in message
+    assert "--eval-file" in message
+
+
+def test_stream_and_eval_splits_must_differ(tmp_path):
+    """Measuring degradation on the split the stream came from is named as an
+    invalidating condition in PREREGISTERED.md."""
+    argv = _ckpt_argv(tmp_path, **{"--corpus-split": "val", "--eval-split": "val"})
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(argv)
+    assert "invalidating condition" in str(excinfo.value)
+
+
+def test_a_nonexistent_checkpoint_fails_before_the_vendor_import(tmp_path):
+    """On the box this failure should cost a second, not a launch."""
+    argv = _ckpt_argv(tmp_path, **{"--checkpoint": str(tmp_path / "absent")})
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(argv)
+    assert "absent" in str(excinfo.value)
+
+
+def test_sequence_eval_now_accepts_a_checkpoint(tmp_path):
+    """The guard used to say a checkpoint-backed run was 'not wired yet'."""
+    argv = _ckpt_argv(tmp_path) + ["--sequence-eval"]
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(argv)
+    assert "not wired yet" not in str(excinfo.value)
+
+
+def test_the_weights_refusal_now_names_the_checkpoint_path(tmp_path):
+    """The refusal lists every escape hatch; the real one had been missing."""
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(
+            ["--objective", "degrade", "--strategy", "select", "--out", str(tmp_path)]
+        )
+    message = str(excinfo.value)
+    assert "--checkpoint" in message
+    assert "renders a verdict" in message
+
+
+# ------------------------------------------------------ checkpoint label ---
+
+
+def test_an_unfingerprinted_checkpoint_says_so(tmp_path):
+    """A bare path names a directory that may have changed. If the run cannot
+    quote a hash, the report must show that rather than imply provenance."""
+    args = cli.build_parser().parse_args(
+        ["--checkpoint", "/weights/1b", "--objective", "degrade"]
+    )
+    assert cli._checkpoint_label(args) == "/weights/1b (UNFINGERPRINTED)"
+
+
+def test_the_manifest_hash_travels_into_the_label(tmp_path):
+    digest = "a" * 64
+    manifest = tmp_path / "manifest.txt"
+    manifest.write_text(f"# files: 12\n# manifest_sha256: {digest}\n", encoding="utf-8")
+    args = cli.build_parser().parse_args(
+        [
+            "--checkpoint", "/weights/1b",
+            "--checkpoint-manifest", str(manifest),
+            "--objective", "degrade",
+        ]
+    )
+    assert cli._checkpoint_label(args) == f"/weights/1b sha256:{digest}"
+
+
+def test_a_manifest_without_a_hash_is_refused(tmp_path):
+    """Silently falling back to UNFINGERPRINTED would hide a broken manifest."""
+    manifest = tmp_path / "manifest.txt"
+    manifest.write_text("# files: 12\n", encoding="utf-8")
+    args = cli.build_parser().parse_args(
+        [
+            "--checkpoint", "/weights/1b",
+            "--checkpoint-manifest", str(manifest),
+            "--objective", "degrade",
+        ]
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        cli._checkpoint_label(args)
+    assert "manifest_sha256" in str(excinfo.value)
+
+
+# ---------------------------------------------------------- token files ---
+
+
+def test_missing_token_file_names_how_to_make_one(tmp_path):
+    with pytest.raises(SystemExit) as excinfo:
+        cli._load_tokens(tmp_path / "absent.npy", "--corpus-file")
+    assert ".npy" in str(excinfo.value)
+
+
+def test_token_files_must_be_one_dimensional_integers(tmp_path):
+    import numpy as np
+
+    two_d = tmp_path / "two_d.npy"
+    np.save(two_d, np.zeros((2, 2), dtype=np.int32))
+    with pytest.raises(SystemExit) as excinfo:
+        cli._load_tokens(two_d, "--corpus-file")
+    assert "1-D" in str(excinfo.value)
+
+    floats = tmp_path / "floats.npy"
+    np.save(floats, np.zeros(4, dtype=np.float32))
+    with pytest.raises(SystemExit) as excinfo:
+        cli._load_tokens(floats, "--corpus-file")
+    assert "integer" in str(excinfo.value)
+
+
+def test_token_files_load_as_int32(tmp_path):
+    import numpy as np
+
+    path = tmp_path / "tokens.npy"
+    np.save(path, np.arange(16, dtype=np.int64))
+    loaded = cli._load_tokens(path, "--corpus-file")
+    assert loaded.dtype.name == "int32"
+    assert loaded.tolist() == list(range(16))
