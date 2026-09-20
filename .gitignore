@@ -33,6 +33,10 @@ venv/
 *sa-key*.json
 *service-account*.json
 *.local
+# `*.local` does NOT match `CONTINUATION.local.md` -- that ends in `.md`. The
+# file claimed to be ignored by that rule for weeks and was merely untracked,
+# one `git add -A` from a public repo. Match the convention as people write it.
+*.local.*
 
 # Local working docs (not part of the tracked tree)
 ROADMAP.md
