@@ -1,15 +1,21 @@
-"""Argument handling for the checkpoint-free model builder.
+"""Argument handling for both victim builders.
 
 CPU only. The vendor tree is not importable here by design, so what this file
 can cover is everything that happens *before* the first vendor import: size
 validation, the `seq_length % mini_batch_size` rule the vendor asserts on, and
 the legibility of the failure when the vendor is absent.
 
+The checkpoint path is covered the same way: every guard that runs before
+the first vendor import, plus the partial-restore filter, which is pure
+pytree work and needs no orbax at all.
+
 It cannot cover that the composed hydra config is correct -- only a box with the
 vendor installed can, and `experiments/003-smoke-125m/run_smoke.py` is what does
 that. Same division as `tests/test_vendor_bind.py`, for the same reason.
 """
 
+import equinox as eqx
+import jax.numpy as jnp
 import pytest
 
 from trustgate.eval import model_build
@@ -139,3 +145,136 @@ def test_dummy_tokens_never_emit_bos():
 
     wide = model_build.dummy_tokens(8192, seed=1, vocab_lo=10, vocab_hi=50_000)
     assert BOS_TOKEN_ID not in set(wide.tolist())
+
+
+# ------------------------------------------------------ checkpoint sources ---
+
+
+def test_gs_uri_passes_through_without_touching_the_filesystem():
+    """Verifying a bucket needs network and credentials; orbax takes the URI
+    verbatim (`infra/checkpoint.py:83-84`), so this layer must not pretend to
+    check it."""
+    uri = "gs://ttt-e2e-checkpoints/1b-books"
+    assert model_build.validate_checkpoint_source(uri) == uri
+
+
+@pytest.mark.parametrize("empty", ["", "   "])
+def test_empty_checkpoint_is_refused_and_names_the_alternative(empty):
+    with pytest.raises(ValueError) as excinfo:
+        model_build.validate_checkpoint_source(empty)
+    assert "--random-init" in str(excinfo.value)
+
+
+def test_missing_checkpoint_directory_is_refused_by_path(tmp_path):
+    absent = tmp_path / "not-there"
+    with pytest.raises(ValueError) as excinfo:
+        model_build.validate_checkpoint_source(str(absent))
+    assert "not-there" in str(excinfo.value)
+
+
+def test_a_file_is_not_a_checkpoint_directory(tmp_path):
+    handle = tmp_path / "ckpt.msgpack"
+    handle.write_bytes(b"")
+    with pytest.raises(ValueError):
+        model_build.validate_checkpoint_source(str(handle))
+
+
+def test_directory_with_a_step_subdir_is_accepted(tmp_path):
+    (tmp_path / "12000").mkdir()
+    assert model_build.validate_checkpoint_source(str(tmp_path)) == str(
+        tmp_path.resolve()
+    )
+
+
+def test_directory_without_a_step_subdir_is_refused_before_orbax_sees_it(tmp_path):
+    """Orbax reports 'No checkpoints found' here, which reads like a missing
+    checkpoint rather than the wrong path. Say which it is."""
+    (tmp_path / "checkpoint_12000").mkdir()
+    with pytest.raises(ValueError) as excinfo:
+        model_build.validate_checkpoint_source(str(tmp_path))
+    message = str(excinfo.value)
+    assert "integer-named step directory" in message
+    assert "checkpoint_12000" in message  # what it found, not just what it wanted
+
+
+def test_layout_mismatch_can_be_overridden_deliberately(tmp_path):
+    """`bootstrap_gpu_box.sh` has the same escape hatch, for the same reason:
+    the check is a guess about layout, not a law."""
+    (tmp_path / "checkpoint_12000").mkdir()
+    assert model_build.validate_checkpoint_source(
+        str(tmp_path), allow_layout_mismatch=True
+    ) == str(tmp_path.resolve())
+
+
+def test_checkpoint_source_is_validated_before_the_vendor_import(tmp_path):
+    """A bad path on a CPU box should say 'bad path', not 'no module named
+    orbax' -- and on a GPU box it should fail before the instance bills."""
+    with pytest.raises(ValueError):
+        model_build.build_from_checkpoint(checkpoint=str(tmp_path / "absent"))
+
+
+def test_size_and_seq_length_are_still_checked_on_the_checkpoint_path(tmp_path):
+    (tmp_path / "0").mkdir()
+    with pytest.raises(ValueError) as excinfo:
+        model_build.build_from_checkpoint(checkpoint=str(tmp_path), size="7b")
+    assert "7b" in str(excinfo.value)
+
+    with pytest.raises(ValueError) as excinfo:
+        model_build.build_from_checkpoint(checkpoint=str(tmp_path), seq_length=5000)
+    assert "5000" in str(excinfo.value)
+
+
+def test_negative_step_is_refused(tmp_path):
+    (tmp_path / "0").mkdir()
+    with pytest.raises(ValueError) as excinfo:
+        model_build.build_from_checkpoint(checkpoint=str(tmp_path), step=-1)
+    assert "-1" in str(excinfo.value)
+
+
+def test_valid_checkpoint_args_reach_the_vendor_import(tmp_path):
+    """Reaching ImportError means every pre-vendor guard let it through."""
+    (tmp_path / "12000").mkdir()
+    with pytest.raises(ImportError) as excinfo:
+        model_build.build_from_checkpoint(checkpoint=str(tmp_path))
+    assert "EXPECTED to fail in the CPU test environment" in str(excinfo.value)
+
+
+# --------------------------------------------- partial-restore detection ---
+
+
+class _Leafy(eqx.Module):
+    """Stand-in with one inexact leaf and one integer leaf.
+
+    `MetaModel.weights()` is `eqx.filter(self, eqx.is_inexact_array)`, so the
+    integer leaf is legitimately absent from every saved checkpoint and must not
+    be reported as a gap.
+    """
+
+    w: jnp.ndarray
+    counter: jnp.ndarray
+
+
+def _model():
+    return _Leafy(w=jnp.zeros((2, 2)), counter=jnp.asarray([0], dtype=jnp.int32))
+
+
+def test_non_inexact_leaves_are_not_treated_as_missing_weights():
+    """Every healthy restore reports these. Flagging them would make the guard
+    fire on a perfectly good checkpoint."""
+    missing = model_build.unexpected_missing_paths([".counter"], _model())
+    assert missing == []
+
+
+def test_a_missing_inexact_weight_is_reported():
+    missing = model_build.unexpected_missing_paths([".w"], _model())
+    assert missing == [".w"]
+
+
+def test_a_clean_restore_reports_nothing():
+    assert model_build.unexpected_missing_paths([], _model()) == []
+
+
+def test_real_gaps_survive_alongside_expected_ones():
+    """The filter must not be fooled by a list that mixes both."""
+    missing = model_build.unexpected_missing_paths([".counter", ".w"], _model())
+    assert missing == [".w"]
