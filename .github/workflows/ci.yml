@@ -96,23 +96,58 @@ jobs:
           if [ "$status" -eq 0 ]; then echo "ok: nothing forbidden is tracked"; fi
           exit "$status"
 
-      - name: Phase 2 gate code is absent
+      - name: Phase 2 scope matches the PREREGISTERED.md revision
         run: |
-          # Standing Rule 2: no gate/ implementation before the Phase 1 spike
-          # returns PROCEED, because it is sunk cost if the verdict is STOP.
-          # The stubs are expected to remain stubs, so assert they still raise.
-          missing=0
-          for f in src/trustgate/gate/anchor.py src/trustgate/gate/uncertainty.py \
-                   src/trustgate/gate/influence.py src/trustgate/gate/policy.py \
-                   src/trustgate/probes/rotating.py \
+          # This check USED to assert that all six Phase 2 files still raised
+          # NotImplementedError, enforcing Standing Rule 2: no gate/ code before
+          # the Phase 1 spike returns PROCEED, because it is sunk cost if the
+          # verdict is STOP.
+          #
+          # That rule was set aside by a dated, signed revision to
+          # experiments/001-attack-spike/PREREGISTERED.md (2026-09-20, Manas
+          # Maahir), which records the decision, who made it, and what it costs.
+          # The revision is the authority for this change; if you are reading
+          # this because the check surprised you, read that first.
+          #
+          # The check did not go away, it inverted. Two files must STILL be
+          # stubbed, and the implemented ones must actually import -- a stub
+          # that was deleted rather than implemented would otherwise pass a
+          # grep-based check silently.
+          status=0
+
+          # Option C is an offline auditor by design (ADR-F1). The MedBN
+          # baseline needs per-example gradients the vendor's inner_loop_step
+          # does not produce, and medbn-diff.md requires it be tuned as hard as
+          # our own gate -- so it is deferred, not forgotten.
+          for f in src/trustgate/gate/influence.py \
                    src/trustgate/baselines/medbn_analogue.py; do
             if ! grep -q "NotImplementedError" "$f"; then
-              echo "::error::$f no longer raises NotImplementedError -- gate work before the verdict (Rule 2)"
-              missing=1
+              echo "::error::$f no longer raises NotImplementedError -- it is deliberately out of Phase 2 scope; if that changed, say so in an ADR"
+              status=1
             fi
           done
-          if [ "$missing" -eq 0 ]; then echo "ok: gate/ is still stubbed"; fi
-          exit "$missing"
+
+          # The implemented four. Importing is the check that matters: it is
+          # what a grep cannot fake.
+          if ! PYTHONPATH=src JAX_PLATFORMS=cpu python -c "
+          from trustgate.gate import anchor_consistency_gate, combine, probe_divergence, uncertainty_gate
+          from trustgate.probes.rotating import make_probe_rotation
+          from trustgate.eval.overhead import measure_overhead
+          "; then
+            echo "::error::the implemented Phase 2 surface does not import"
+            status=1
+          fi
+
+          # The bounded-drift property is still NOT enforced: the vendor scan
+          # carry has no slot for DriftState (ADR-003 correction, ADR-P3-1).
+          # policy.py must keep saying so, or the disclosure overclaims.
+          if ! grep -q "WHAT DOES NOT WORK YET" src/trustgate/gate/policy.py; then
+            echo "::error::policy.py dropped its note that drift is not enforced -- ADR-003 forbids describing it as enforced"
+            status=1
+          fi
+
+          if [ "$status" -eq 0 ]; then echo "ok: Phase 2 scope matches the revision"; fi
+          exit "$status"
 
       - name: Both pre-push guards allow the same remotes
         run: |
