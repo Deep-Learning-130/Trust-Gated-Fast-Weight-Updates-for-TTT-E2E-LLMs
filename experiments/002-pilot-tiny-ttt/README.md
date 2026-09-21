@@ -76,6 +76,25 @@ serves the victim in deployment order — attacker stream, then a benign documen
 then score that document's continuation — so the measured quantity is the one the
 threat model names.
 
+### A third script, for a different question
+
+`run_sequence.py` exercises the **secondary sequence-position arms**
+(`PREREGISTERED.md`, Addendum 2026-09-20): 50 windows, benign loss measured
+after every one, plus no-carry counterparts and a no-stream floor. About 40 s on
+CPU, $0, and it renders no verdict — same warning as everything else here.
+
+It exists because `trustgate.eval.sequence` is orchestration, and orchestration
+proven only against fakes is proven only self-consistent. This runs it against a
+model that genuinely adapts, and it is where `--eval-every` should be chosen
+before that stride costs A100 time.
+
+On the shallow base weights it reports a clean null, which is expected: with
+ordering as the only lever, `poison` and `control` sit on top of each other.
+What it does show is the floor working — `poison_no_carry` lands near the
+no-stream floor while the threaded arms sit well below it, i.e. the benefit here
+comes from accumulation, which is exactly the axis the arms were added to
+measure.
+
 ## Result (deep run)
 
 | Quantity | Observed | Pre-registered bar |

@@ -19,6 +19,14 @@ Degenerate statistics cannot pass
 constant-valued result -- a stubbed harness, a model that never adapted, an
 `adapt_and_eval` returning the same number every seed -- would render **PROCEED**
 with an infinite effect size. A non-finite effect size is now a hard FAIL.
+
+Two renderers, one verdict
+--------------------------
+`render_markdown` decides PROCEED/STOP. `render_sequence_markdown` renders the
+secondary sequence-position arms and deliberately emits no verdict line, no
+threshold table and no PASS/FAIL column. Keeping them as separate functions --
+rather than one renderer with a flag -- is what makes "the non-gating arms
+cannot move the verdict" a structural fact instead of a promise.
 """
 
 from __future__ import annotations
@@ -27,6 +35,14 @@ import math
 from pathlib import Path
 
 from trustgate.eval.harness import SpikeResult
+from trustgate.eval.metrics import accumulation_excess, onset_window
+from trustgate.eval.sequence import (
+    ARM_NAMES,
+    CONTROL,
+    POISON,
+    POISON_NO_CARRY,
+    SequenceResult,
+)
 
 
 def render_markdown(
@@ -215,4 +231,139 @@ def write_report(result: SpikeResult, path: Path, **thresholds) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_markdown(result, **thresholds), encoding="utf-8")
+    return path
+
+
+# --------------------------------------------------------------------------
+# Sequence-position report. Separate renderer, no verdict.
+# --------------------------------------------------------------------------
+
+NO_VERDICT_BANNER = (
+    # No inner `**`: the banner is emitted inside a bold blockquote and nested
+    # emphasis renders as literal asterisks.
+    "SECONDARY, NON-GATING. This report renders no verdict and touches no "
+    "pre-registered bar. The PROCEED/STOP decision is made only by "
+    "`render_markdown` against the three thresholds frozen on 2026-07-28. See "
+    "`PREREGISTERED.md`, Addendum 2026-09-20."
+)
+
+
+def render_sequence_markdown(result: SequenceResult, *, onset_delta: float) -> str:
+    """Render the position curves.
+
+    Emits no verdict line at all -- not a STOP, not a PROCEED, not a PASS/FAIL
+    column. `render_markdown`'s verdict conjunction is untouched by
+    construction rather than by convention, which is the whole reason this is a
+    second function instead of another section in the first one.
+
+    `onset_delta` is a reported sensitivity for `onset_window`, printed next to
+    every value it produced. An onset without its delta is not interpretable.
+    """
+    lines = [
+        f"> **{NO_VERDICT_BANNER}**",
+        "",
+        "# Sequence-position arms -- secondary",
+        "",
+        f"Windows: {result.n_windows} | Measured every: {result.eval_every} | "
+        f"Seeds: {len(result.seeds)}",
+        "",
+        f"Floor (read nothing at all): {result.floor_loss:.6f}",
+        "",
+    ]
+
+    lines += _arm_summary_section(result)
+    lines += _derived_section(result, onset_delta)
+    lines += _per_seed_curve_section(result)
+
+    return "\n".join(lines) + "\n"
+
+
+def _arm_summary_section(result: SequenceResult) -> list[str]:
+    """End-of-stream mean per arm, plus the gap to the floor."""
+    lines = ["## End of stream", "", "| Arm | Mean final loss | Above floor |", "|---|---|---|"]
+
+    for name in ARM_NAMES:
+        finals = result.final_losses(name)
+        mean_final = sum(finals) / len(finals)
+        lines.append(
+            f"| `{name}` | {mean_final:.6f} | {mean_final - result.floor_loss:+.6f} |"
+        )
+
+    lines += [
+        "",
+        "`poison` and `control` here are the same quantity the frozen spike "
+        "measures; the two should agree seed for seed.",
+        "",
+    ]
+    return lines
+
+
+def _derived_section(result: SequenceResult, onset_delta: float) -> list[str]:
+    """Accumulation excess and onset, per seed. All non-gating."""
+    lines = [
+        "## Derived",
+        "",
+        f"Onset delta (reported sensitivity, not a bar): {onset_delta:g}",
+        "",
+        "| Seed | Final accumulation excess | Onset window |",
+        "|---|---|---|",
+    ]
+
+    for seed in result.seeds:
+        poison = result.arm(seed, POISON)
+        control = result.arm(seed, CONTROL)
+        poison_nc = result.arm(seed, POISON_NO_CARRY)
+
+        excess = accumulation_excess(poison.per_window_loss, poison_nc.per_window_loss)
+        onset = onset_window(
+            poison.per_window_loss, control.per_window_loss, onset_delta
+        )
+        onset_cell = "never" if onset is None else str(poison.window_index(onset))
+
+        lines.append(f"| {seed} | {float(excess[-1]):+.6f} | {onset_cell} |")
+
+    lines += [
+        "",
+        "Accumulation excess is `poison` minus `poison_no_carry`. Near zero "
+        "means the harm did not need carry to build up, and fast-weight "
+        "accumulation is not the vector.",
+        "",
+        "Onset is the first window where `poison` exceeds `control` by the "
+        "delta above -- the 'attack slowness' axis `PREREGISTERED.md` lists as "
+        "secondary.",
+        "",
+    ]
+    return lines
+
+
+def _per_seed_curve_section(result: SequenceResult) -> list[str]:
+    """Every measured value, for every arm, for every seed.
+
+    Standing Rule 6 again: `render_markdown` had to be fixed once already for
+    hiding per-seed numbers a reader would have wanted. Not repeating that.
+    """
+    lines = ["## Per-seed curves", ""]
+
+    for seed in result.seeds:
+        lines += [f"### Seed {seed}", "", "| Window | " + " | ".join(f"`{n}`" for n in ARM_NAMES) + " |"]
+        lines.append("|---" * (len(ARM_NAMES) + 1) + "|")
+
+        traces = [result.arm(seed, name) for name in ARM_NAMES]
+        for i in range(len(traces[0].per_window_loss)):
+            cells = " | ".join(f"{t.per_window_loss[i]:.6f}" for t in traces)
+            lines.append(f"| {traces[0].window_index(i)} | {cells} |")
+
+        lines.append("")
+
+    return lines
+
+
+def write_sequence_report(
+    result: SequenceResult, path: Path, *, onset_delta: float
+) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        render_sequence_markdown(result, onset_delta=onset_delta), encoding="utf-8"
+    )
     return path
