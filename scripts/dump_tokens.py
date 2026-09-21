@@ -46,6 +46,8 @@ import make_val_subset as mvs  # noqa: E402
 
 DEFAULT_TRAIN_TOKENS = 16_000_000
 DEFAULT_PROBE_OFFSET = 10_000_000
+#: Below this the ordering search has too few distinct spans to choose among.
+MIN_TRAIN_TOKENS = 1_000_000
 
 
 def _codecs(meta: dict) -> list[str]:
@@ -197,14 +199,24 @@ def main(argv: list[str] | None = None) -> int:
             sys.exit("train chunk 0 is not local; pass --billing to fetch it")
         train_dir = fetch_train_chunk0(args.billing, args.bucket, train_root)
     train_meta = mvs.read_meta(train_dir / "zarr.json")
-    tokens = read_slice(train_dir, train_meta, _find_chunk0(train_dir), 0, args.train_tokens)
+    # /train's chunk size has never been inspected (only /val's is documented).
+    # A smaller chunk 0 still makes a fine span corpus: take all of it rather
+    # than stopping the session over a default.
+    train_len = min(args.train_tokens, mvs.chunk_shape_of(train_meta))
+    if train_len < min(args.train_tokens, MIN_TRAIN_TOKENS):
+        sys.exit(f"/train chunk 0 holds only {train_len:,} tokens; the span corpus needs "
+                 f"at least {MIN_TRAIN_TOKENS:,}")
+    if train_len < args.train_tokens:
+        print(f"  note: /train chunk 0 holds {train_len:,} tokens; using all of it "
+              f"instead of --train-tokens {args.train_tokens:,}")
+    tokens = read_slice(train_dir, train_meta, _find_chunk0(train_dir), 0, train_len)
     path = args.out / "train.npy"
     np.save(path, tokens)
     manifest["files"][path.name] = {
-        "source": f"{args.bucket}/train chunk 0", "start": 0, "length": args.train_tokens,
+        "source": f"{args.bucket}/train chunk 0", "start": 0, "length": train_len,
         "sha256": _sha256(path),
     }
-    print(f"  {path}: {args.train_tokens:,} tokens from /train")
+    print(f"  {path}: {train_len:,} tokens from /train")
 
     (args.out / "tokens-manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print(f"  manifest: {args.out / 'tokens-manifest.json'}")

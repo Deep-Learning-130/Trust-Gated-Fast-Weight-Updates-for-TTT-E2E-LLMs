@@ -161,6 +161,21 @@ def build_config(
 
     # train.py:123 -- the model reads its length from here, not from training.
     cfg.model.seq_len = cfg.training.seq_length
+
+    # The suffix SWA indexes RoPE at positions up to window + mini_batch
+    # (attention.py:350-351) in a table of 2 * seq_len rows (attention.py:128),
+    # and `jnp.take` returns NaN out of range rather than raising. Too short a
+    # seq_length therefore gives an all-NaN loss with no error at all.
+    need = int(cfg.model.sliding_window_size) + int(cfg.model.mini_batch_size)
+    if 2 * int(cfg.model.seq_len) < need:
+        raise ValueError(
+            f"seq_length {seq_length} is too short for this model: the suffix "
+            f"attention reads RoPE positions up to {need} (sliding window "
+            f"{cfg.model.sliding_window_size} + mini_batch {cfg.model.mini_batch_size}) "
+            f"from a table of 2 * seq_length = {2 * seq_length}, and the vendor "
+            f"returns NaN past its end. Use seq_length >= {-(-need // 2)} "
+            f"rounded up to a multiple of {MINI_BATCH_SIZE} (8192 is the run value)."
+        )
     return cfg
 
 

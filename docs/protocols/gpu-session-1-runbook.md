@@ -90,8 +90,8 @@ the part worth keeping.
 PYTHONPATH=src JAX_PLATFORMS=cpu .venv/Scripts/python.exe -m pytest
 ```
 
-As of 2026-09-20: **473 passed** with the reference model fetched, **462 passed / 11
-skipped** without (what CI sees). Quote both, per `branch-and-review.md` item 2, and update
+As of 2026-09-21: **510 passed** with the reference model fetched (the laptop). Without it
+the fluency tests skip, which is what CI sees. Quote both, per `branch-and-review.md` item 2, and update
 that line if the counts change. **Use `.venv/Scripts/python.exe`** — the system interpreter
 has no `equinox` and every test errors at collection.
 
@@ -155,10 +155,17 @@ Jaykay must be reachable **for the whole session**, not only the download.
 Machine type : a2-ultragpu-1g   (1 x A100 80GB)
 Provisioning : on-demand, NOT Spot
 Image        : Deep Learning VM with CUDA >= 12.8, or Ubuntu 22.04 + CUDA >= 12.8
-Disk         : >= 200 GB   (checkpoint, dataset, and two runs of artifacts)
-Scopes       : default service account with storage read
+Disk         : >= 200 GB balanced PD   (checkpoint, dataset, and two runs of artifacts)
+Scopes       : default service account, "Allow full access to all Cloud APIs"
+               (IAM still limits it; a narrow scope is a failure 35 min into the bootstrap)
+External IP  : keep the default ephemeral IP (uv sync and the GPT-2 fetch need internet)
+Metadata     : install-nvidia-driver = True   (Deep Learning VM images)
 Region       : the one A0 step 3 settled on
 ```
+
+The operator's walkthrough, with a console field-by-field guide and every command,
+lives in the shared "Session 1 Field Protocol" page
+(https://claude.ai/artifact/GeBm35yqY6eMbqRZTwM8Tt, shared with Jaykay).
 
 ### B2. Log in and clone (0:05)
 
@@ -196,11 +203,16 @@ It must end with `Bootstrap complete`.
 
 ### B4. Fingerprint before trusting the weights
 
+The bootstrap already fingerprinted the checkpoint (its Step 4). **Do not run
+`fingerprint_checkpoint.sh` bare**: without `DEST` and `CKPT` it exits at once. Check the
+manifest instead:
+
 ```bash
-bash scripts/fingerprint_checkpoint.sh
+grep manifest_sha256 experiments/000-repro-baseline/results/checkpoint-sha256-1b_ttt_e2e_finetune_books_8k_1x_cc.txt
 ```
 
-Pass the resulting `manifest_sha256` to every later run via `--checkpoint-manifest`. Without
+That must print one line with a 64-hex-digit hash. `phase1.env` passes that file to every
+later run as `--checkpoint-manifest $CKPT_MANIFEST`. Without
 it the report records the run as `UNFINGERPRINTED`, which is honest but weaker: a bare path
 names a directory that may have changed, and the hash names the bytes.
 
@@ -238,7 +250,13 @@ checks that its calibration divergence is non-zero and finite. If that check fai
 probe forward is broken: **do not run C5**.
 
 Always invoke the CLI as `$TG ...`. A bare `python -m trustgate.eval.cli` picks the
-wrong interpreter.
+wrong interpreter. `$TG` lives only in the shell that sourced `phase1.env`. **In a new tmux
+window, or after reattaching to a new shell, source it again first.**
+
+When a checkpoint loads, orbax prints `ERROR:absl: ... metrics not found` and
+`Missing metrics for step ...`. Both are harmless: the checkpoint has no metrics item,
+and only `model_weights` is restored. The line that matters is `[run] bound;` (or
+`[gate] bound;`), which follows it.
 
 The inner step is compiled with `eqx.filter_jit`. If a trace fails,
 `TRUSTGATE_NO_JIT=1 $TG ...` runs it eagerly, for diagnosis only; never time anything

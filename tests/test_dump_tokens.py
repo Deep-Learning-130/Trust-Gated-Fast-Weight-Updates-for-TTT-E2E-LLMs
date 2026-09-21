@@ -88,3 +88,19 @@ def test_refuses_a_truncated_chunk(dump, tmp_path):
     meta = json.loads((array_dir / "zarr.json").read_text(encoding="utf-8"))
     with pytest.raises(SystemExit, match="Partial download"):
         dump.read_slice(array_dir, meta, array_dir / "c" / "0", 0, 10)
+
+
+def test_a_small_train_chunk_is_used_whole_not_refused(dump, tmp_path, monkeypatch):
+    """/train's chunk size was never inspected; a chunk smaller than the default
+    request must not stop the session."""
+    monkeypatch.setattr(dump, "MIN_TRAIN_TOKENS", 1000)
+    train = np.arange(100_000, 100_000 + CHUNK)
+    out = run(dump, tmp_path, np.arange(10, 10 + CHUNK), train, **{"--train-tokens": 16_000_000})
+    np.testing.assert_array_equal(np.load(out / "train.npy"), train)
+    manifest = json.loads((out / "tokens-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["files"]["train.npy"]["length"] == CHUNK
+
+
+def test_refuses_a_train_chunk_too_small_to_search(dump, tmp_path):
+    with pytest.raises(SystemExit, match="at least"):
+        run(dump, tmp_path, np.arange(10, 10 + CHUNK), np.arange(CHUNK), **{"--train-tokens": 16_000_000})
