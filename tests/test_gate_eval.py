@@ -326,3 +326,16 @@ def test_cli_gate_eval_against_a_checkpoint_needs_the_spike_arms(tmp_path):
         main(["--objective", "degrade", "--strategy", "select", "--gate-eval",
               "--checkpoint", str(tmp_path), "--corpus-file", str(tokens),
               "--eval-file", str(tokens), "--out", str(tmp_path)])
+
+
+def test_cli_sequence_eval_against_a_checkpoint_needs_the_spike_arms(tmp_path):
+    """The addendum ties the sequence endpoints to `corruption_metric` on the
+    same streams; synthetic orderings against real weights would not be that."""
+    from trustgate.eval.cli import main
+
+    tokens = tmp_path / "t.npy"
+    np.save(tokens, np.arange(10, dtype=np.int32))
+    with pytest.raises(SystemExit, match="--arms-file"):
+        main(["--objective", "degrade", "--strategy", "select", "--sequence-eval",
+              "--checkpoint", str(tmp_path), "--corpus-file", str(tokens),
+              "--eval-file", str(tokens), "--out", str(tmp_path)])

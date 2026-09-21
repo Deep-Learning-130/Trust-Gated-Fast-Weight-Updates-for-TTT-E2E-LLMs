@@ -218,43 +218,55 @@ DEADLINE_HOURS=2.5 bash scripts/run_gpu_session.sh
 measured afterwards is unattributable** — it might be our own misconfiguration. Do not
 proceed past a FAIL. Bar and structural checks are in the Acceptance table below.
 
-### C1b. Pull the gate code and dump the token files (after 000 PASS)
+### C1b. Prepare for 001 and the gate (after 000 PASS, ~10 min, no verdict)
 
 ```bash
-git pull                                            # the gate wiring may have landed during 000
-source "$EXP_DIR/bootstrap/session.env"             # BOOKS3_LOCAL, CKPT_DEST, CKPT_MANIFEST
-( cd vendor/ttt-e2e && uv run python ../../scripts/dump_tokens.py     --books3 "$BOOKS3_LOCAL" --billing "$GCP_BILLING_PROJECT" --out "$EXP_DIR/tokens" )
-T=$EXP_DIR/tokens
+git pull                                   # the gate wiring may have landed during 000
+export GCP_BILLING_PROJECT=<project>       # same shell as the bootstrap
+bash scripts/prepare_phase1.sh
+source "$EXP_DIR/phase1.env"               # defines $TG, $T, $CKPT_DEST, $CKPT_MANIFEST
 ```
 
-Writes `train.npy` (attacker corpus, /train chunk 0), `val.npy` (the benign eval, one
-8193-token sequence), `probe.npy` (the gate's probe window, disjoint from the eval) and
-`tokens-manifest.json`. It refuses a constant slice, which is the zarr fill-value trap.
+**Before this, no interpreter on the box could run the checkpoint CLI.** `trustgate`
+runs from `PYTHONPATH=src` and is installed nowhere. The vendor env lacks the fluency
+scorer's `tokenizers` and `safetensors`. The reference model was never fetched, and the
+`.npy` token files did not exist. The script fixes all four. Then it proves one
+interpreter sees `ttt`, `trustgate` and the GPU, runs the fluency self-test, and writes
+`$T/{train,val,probe}.npy`, refusing a constant slice (the zarr fill-value trap). Last,
+it runs a **random-init 125m `--gate-eval` smoke** through the real vendor forward and
+checks that its calibration divergence is non-zero and finite. If that check fails, the
+probe forward is broken: **do not run C5**.
 
-**Then prove the gate compiles on the real vendor, for free, before any real run:**
+Always invoke the CLI as `$TG ...`. A bare `python -m trustgate.eval.cli` picks the
+wrong interpreter.
 
-```bash
-python -m trustgate.eval.cli --objective degrade --strategy select --gate-eval   --random-init --size 125m --stream-tokens 8192 --seeds 0 1   --overhead-repeats 3 --out /tmp/gate-smoke
-```
-
-Banner-marked instrument validation. It has to finish with `gate.md` and a
-**non-zero** divergence range under Calibration. All-zero or all-unscorable means the
-probe forward is wrong, so stop and fix it before C5. The inner step is now compiled
-with `eqx.filter_jit`. If a trace fails, `TRUSTGATE_NO_JIT=1` runs it eagerly for
-diagnosis only; never time anything under it.
+The inner step is compiled with `eqx.filter_jit`. If a trace fails,
+`TRUSTGATE_NO_JIT=1 $TG ...` runs it eagerly, for diagnosis only; never time anything
+under it.
 
 ### C2. Measure one adapt-and-eval before budgeting the search
 
-Run the C3 command below with `--seeds 0 --max-iters 1` and time it. Multiply by
-seeds × proposals. **Choose `--max-iters` from that number**, not from `run_deep.py`'s
-40, which was picked on CPU against a tiny model and does not transfer.
+```bash
+time $TG --objective degrade --strategy select \
+  --checkpoint $CKPT_DEST --checkpoint-manifest $CKPT_MANIFEST \
+  --corpus-file $T/train.npy --eval-file $T/val.npy \
+  --size 1b --seq-length 8192 --stream-tokens 8192 \
+  --seeds 0 1 --max-iters 1 --early-stop-patience 0 \
+  --out $EXP_DIR/c2-timing
+```
+
+Two seeds, not one: `cohens_d` needs two per group, and a one-seed run would crash in
+`summarize` after the timing it exists to take. The wall-clock includes checkpoint load,
+compile and the fluency scoring, so it is an upper bound. Take the time after the
+`[run] searching` line, divide it by 2 seeds, then multiply by 5 seeds × proposals. **Choose `--max-iters` from that number**, not from `run_deep.py`'s
+40, which was picked on CPU against a tiny model and does not transfer. Its `--out` is
+deliberately not the C3 directory, and its report is not a result.
 
 ### C3. 001 kill gate
 
 ```bash
-python -m trustgate.eval.cli \
-  --objective degrade --strategy select \
-  --checkpoint <dir> --checkpoint-manifest <manifest> \
+$TG --objective degrade --strategy select \
+  --checkpoint $CKPT_DEST --checkpoint-manifest $CKPT_MANIFEST \
   --corpus-file $T/train.npy --eval-file $T/val.npy \
   --corpus-split train --eval-split val \
   --size 1b --seq-length 8192 --stream-tokens 8192 \
@@ -271,32 +283,50 @@ If the search accepts nothing, the CLI exits with `NULL RESULT (not an error)`. 
 real finding — under SELECT the attacker's only lever is ordering — and it is reported as a
 null, not retried at a kinder setting.
 
+C3 writes `arms.pkl` (the crafted streams, by seed) into its `--out` **the moment the
+search ends**, before the spike itself runs. C4 and C5 re-run exactly those streams.
+
 ### C4. Sequence-position arms — secondary, non-gating
 
-Add `--sequence-eval`. Renders no verdict line at all, by design, so the two artifacts
-cannot be confused.
+```bash
+$TG --objective degrade --strategy select --sequence-eval \
+  --checkpoint $CKPT_DEST --checkpoint-manifest $CKPT_MANIFEST \
+  --corpus-file $T/train.npy --eval-file $T/val.npy \
+  --arms-file experiments/001-attack-spike/results/arms.pkl \
+  --size 1b --seq-length 8192 --seeds 0 1 2 3 4 \
+  --out experiments/001-attack-spike/results/sequence
+```
 
-C3 writes `arms.pkl` (the crafted streams, by seed) into its `--out` **the moment the
-search ends**, before the spike itself runs. C5 re-runs exactly those streams.
+This renders no verdict line at all, by design, so the two artifacts cannot be confused.
+Against a checkpoint it requires `--arms-file`: the addendum holds the end-of-stream values
+to the same quantity `corruption_metric` consumes, and that is only true on the spike's own
+streams. The window count comes from those streams (8 at 8192 tokens), not from
+`--windows`.
 
 ### C5. Phase 2 gate measurement
 
 ```bash
-python -m trustgate.eval.cli   --objective degrade --strategy select --gate-eval   --checkpoint <dir> --checkpoint-manifest <manifest>   --corpus-file $T/train.npy --eval-file $T/val.npy --probe-file $T/probe.npy   --arms-file experiments/001-attack-spike/results/arms.pkl   --size 1b --seq-length 8192 --seeds 0 1 2 3 4   --gate-quantiles 0.9 0.99   --out experiments/001-attack-spike/results/gate
+$TG --objective degrade --strategy select --gate-eval \
+  --checkpoint $CKPT_DEST --checkpoint-manifest $CKPT_MANIFEST \
+  --corpus-file $T/train.npy --eval-file $T/val.npy --probe-file $T/probe.npy \
+  --arms-file experiments/001-attack-spike/results/arms.pkl \
+  --size 1b --seq-length 8192 --seeds 0 1 2 3 4 \
+  --gate-quantiles 0.9 0.99 \
+  --out experiments/001-attack-spike/results/gate
 ```
 
 This calibrates the anchor gate on a clean, uncrafted corpus slice. It reads thresholds
 off that slice's divergence quantiles, and those are **pre-verdict operating points, not
-tuned values**. Then it measures, into `gate.md`:
+tuned values**. Then it measures, into `gate.md` (and `gate-result.pkl`):
 - gate overhead against the ~10% budget (median of 20, compiled, warm);
 - `clean_regression` on the control arms at each threshold;
 - gated vs ungated corruption (d, relative degradation) and acceptance rates on the 001
   arms.
 
-Cost: seeds × 2 arms × (1 + number of thresholds) adapt-and-evals, with no search. Budget
-it from the C2 timing. **Report the overhead number, not just the pass/fail bool**: a
-marginal pass is inside the noise of any wall-clock measurement. The probe set is fixed,
-not rotating, and `gate.md` says so.
+Cost: seeds × 2 arms × (1 + number of thresholds) adapt-and-evals, with no search, plus
+one compile per threshold. Budget it from the C2 timing. **Report the overhead number, not
+just the pass/fail bool**: a marginal pass is inside the noise of any wall-clock
+measurement. The probe set is fixed, not rotating, and `gate.md` says so.
 
 Bounded drift is **not** measured here and must not be reported as enforced: there is no
 carry slot for the accumulator (ADR-003 correction, ADR-P3-1).

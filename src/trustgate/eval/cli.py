@@ -20,6 +20,7 @@ Thresholds come from `trustgate.eval.prereg.FROZEN`, which CI pins to
 from __future__ import annotations
 
 import argparse
+import contextlib
 import pickle
 import sys
 from pathlib import Path
@@ -486,13 +487,33 @@ SEQUENCE_NOT_GATING = (
 )
 
 
-def _sequence_run(args) -> int:
-    """Drive the secondary sequence-position arms against a random-init victim.
+def _load_arms(args) -> dict:
+    """The 001 spike's crafted streams, by seed, from the arms.pkl it wrote."""
+    if args.arms_file is None:
+        raise SystemExit(
+            "against a checkpoint this needs --arms-file: the spike run's "
+            "arms.pkl (in its --out). Its streams are the ones the attacker "
+            "found; any other ordering measures a different experiment."
+        )
+    with Path(args.arms_file).open("rb") as fh:
+        arms = pickle.load(fh)
+    absent = [s for s in args.seeds if s not in arms]
+    if absent:
+        raise SystemExit(f"--arms-file has no arms for seeds {absent}")
+    return arms
 
-    Shares `_random_init_run`'s victim construction deliberately: the point of
-    these curves is that they sit alongside the spike's endpoint, and a
-    separately-built victim would put them on a different model.
+
+def _sequence_run(args) -> int:
+    """Drive the secondary sequence-position arms.
+
+    Against --random-init: random orderings over synthetic tokens, instrument
+    validation only, bannered. Against --checkpoint: the spike's own crafted
+    streams from --arms-file and the real --eval-file, because the addendum
+    holds the end-of-stream values to the same quantity `corruption_metric`
+    consumes -- which is only true on the same streams and the same eval.
     """
+    import numpy as np
+
     from trustgate.attack.corpus import TokenCorpus
     from trustgate.attack.stream import generate_seed_pairs
     from trustgate.eval import vendor_bind
@@ -506,40 +527,53 @@ def _sequence_run(args) -> int:
     from trustgate.eval.report import write_sequence_report
     from trustgate.eval.sequence import make_vendor_windows, run_sequence_eval
 
-    cfg, _model, binding, mini_batch, _label = _build_victim(args, tag="sequence")
+    if args.checkpoint:
+        arms = _load_arms(args)
+        eval_tokens = _load_tokens(Path(args.eval_file), "--eval-file")
+        eval_split = args.eval_split
+    else:
+        arms = None
+        eval_tokens = dummy_tokens(args.seq_length + 1, seed=2)
+        eval_split = "synthetic"
 
-    expected = args.windows * mini_batch
-    if args.stream_tokens != expected:
-        raise SystemExit(
-            f"--windows {args.windows} at mini_batch_size {mini_batch} needs "
-            f"--stream-tokens {expected}, got {args.stream_tokens}. One window "
-            f"is one inner step; a stream that does not divide evenly would "
-            f"measure the last window at a different dose than the rest."
+    cfg, _model, binding, mini_batch, label = _build_victim(args, tag="sequence")
+
+    if arms is None:
+        expected = args.windows * mini_batch
+        if args.stream_tokens != expected:
+            raise SystemExit(
+                f"--windows {args.windows} at mini_batch_size {mini_batch} needs "
+                f"--stream-tokens {expected}, got {args.stream_tokens}. One window "
+                f"is one inner step; a stream that does not divide evenly would "
+                f"measure the last window at a different dose than the rest."
+            )
+        corpus = TokenCorpus(
+            dummy_tokens(args.corpus_tokens, seed=7, vocab_lo=10, vocab_hi=50_000),
+            name="synthetic",
         )
-    print(f"[sequence] {args.windows} windows of {mini_batch} tokens")
-
-    corpus = TokenCorpus(
-        dummy_tokens(args.corpus_tokens, seed=7, vocab_lo=10, vocab_hi=50_000),
-        name="synthetic",
-    )
-    eval_tokens = dummy_tokens(args.seq_length + 1, seed=2)
-
-    pairs = generate_seed_pairs(
-        corpus,
-        args.stream_tokens,
-        list(args.seeds),
-        craft_fn=None,
-        mini_batch_size=mini_batch,
-    )
-    arms = dict(zip(args.seeds, pairs))
+        pairs = generate_seed_pairs(
+            corpus,
+            args.stream_tokens,
+            list(args.seeds),
+            craft_fn=None,
+            mini_batch_size=mini_batch,
+        )
+        arms = dict(zip(args.seeds, pairs))
+        windows = args.windows
+    else:
+        # The window count is whatever the spike's streams hold; --windows
+        # sizes synthetic streams only.
+        n = int(np.asarray(arms[args.seeds[0]][0].tokens).shape[0])
+        windows = n // mini_batch
+    print(f"[sequence] {windows} windows of {mini_batch} tokens")
 
     first_poison, _ = arms[args.seeds[0]]
     condition = RunCondition.from_stream(
         first_poison,
         seed=args.seeds[0],
         seq_length=args.seq_length,
-        checkpoint=f"random-init-{args.size} (NO CHECKPOINT)",
-        benign_eval_split="synthetic",
+        checkpoint=label,
+        benign_eval_split=eval_split,
         eval_tokens_sha256=eval_tokens_digest(eval_tokens),
     )
 
@@ -561,7 +595,8 @@ def _sequence_run(args) -> int:
     report_path = write_sequence_report(
         result, out / "sequence.md", onset_delta=args.onset_delta
     )
-    _banner_report(report_path, NOT_A_RESULT)
+    if not args.checkpoint:
+        _banner_report(report_path, NOT_A_RESULT)
 
     print(f"\n[sequence] {SEQUENCE_NOT_GATING}")
     print(report_path.read_text(encoding="utf-8"))
@@ -612,11 +647,7 @@ def _gate_run(args) -> int:
             )
         if Path(args.probe_file).resolve() == Path(args.eval_file).resolve():
             raise SystemExit("--probe-file and --eval-file are the same file")
-        with Path(args.arms_file).open("rb") as fh:
-            arms = pickle.load(fh)
-        absent = [s for s in args.seeds if s not in arms]
-        if absent:
-            raise SystemExit(f"--arms-file has no arms for seeds {absent}")
+        arms = _load_arms(args)
         eval_tokens = _load_tokens(Path(args.eval_file), "--eval-file")
         probe_tokens = _load_tokens(Path(args.probe_file), "--probe-file")
         corpus_tokens = _load_tokens(Path(args.corpus_file), "--corpus-file")
@@ -753,6 +784,16 @@ def _checkpoint_label(args) -> str:
     )
 
 
+#: Holds the victim's device mesh open for the rest of the run. The vendor's
+#: sliding-window attention calls `with_sharding_constraint` with a bare
+#: `PartitionSpec` (`attention.py:308-314`, unconditionally), which only resolves
+#: inside an active `with mesh:` -- `train.py:222` runs everything under one.
+#: `model_build` builds the victim under the mesh and returns it; every forward
+#: pass after that has to stay inside it too, or the first inner step fails.
+#: `main` closes this on the way out.
+_VICTIM_SCOPE = contextlib.ExitStack()
+
+
 def _build_victim(args, *, tag: str):
     """Build the victim once, whichever path was asked for.
 
@@ -770,7 +811,7 @@ def _build_victim(args, *, tag: str):
     if args.checkpoint:
         print(f"[{tag}] loading {args.size} weights from {args.checkpoint}")
         try:
-            cfg, model, state, _mesh = build_from_checkpoint(
+            cfg, model, state, mesh = build_from_checkpoint(
                 checkpoint=args.checkpoint,
                 size=args.size,
                 seq_length=args.seq_length,
@@ -786,13 +827,14 @@ def _build_victim(args, *, tag: str):
     else:
         print(f"[{tag}] building a {args.size} victim at seq_length={args.seq_length}")
         try:
-            cfg, model, state, _mesh = build_random_init(
+            cfg, model, state, mesh = build_random_init(
                 size=args.size, seq_length=args.seq_length
             )
         except (ImportError, ValueError) as exc:
             raise SystemExit(str(exc)) from exc
         label = f"random-init-{args.size} (NO CHECKPOINT)"
 
+    _VICTIM_SCOPE.enter_context(mesh)
     mini_batch = int(cfg.model.mini_batch_size)
     binding = vendor_bind.bind(model, state)
     print(f"[{tag}] bound; mini_batch_size={mini_batch}")
@@ -955,6 +997,11 @@ def _checkpoint_run(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    with _VICTIM_SCOPE:
+        return _main(argv)
+
+
+def _main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.fluency_selftest:

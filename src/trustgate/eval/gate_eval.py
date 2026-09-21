@@ -98,19 +98,25 @@ class AnchorGateSpec:
 
 
 def make_gate_inputs(binding, probe_tokens, *, bos_token_id: int) -> GateInputs:
-    """Build the fixed probe window from `mini_batch_size + 1` held-out tokens."""
+    """Build the fixed probe window: chunk 0 of one full held-out sequence.
+
+    The prefix pass runs over a whole `seq_length` sequence, the only length
+    the vendor model is configured and exercised at, rather than over a lone
+    mini-batch. Attention is causal, so chunk 0's prefix output is the same
+    either way; this just never shows the vendor a shape it has not seen.
+    """
     from trustgate.eval import vendor_bind
 
-    need = binding.mini_batch_size + 1
+    need = binding.seq_length + 1
     probe_tokens = np.asarray(probe_tokens)
     if probe_tokens.shape[0] < need:
         raise ValueError(
-            f"probe needs {need} tokens (one mini-batch plus the target "
-            f"shift), got {probe_tokens.shape[0]}"
+            f"probe needs {need} tokens (one seq_length sequence plus the "
+            f"target shift), got {probe_tokens.shape[0]}"
         )
-    (probe_seq, probe_prefix), = vendor_bind.sequence_chunks(
+    probe_seq, probe_prefix = vendor_bind.sequence_chunks(
         binding, probe_tokens[:need], bos_token_id=bos_token_id
-    )
+    )[0]
     return GateInputs(
         theta_0=binding.fast_weights(),
         probe_seq=probe_seq,

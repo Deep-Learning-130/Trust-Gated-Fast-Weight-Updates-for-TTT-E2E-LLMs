@@ -13,7 +13,8 @@ Writes, into --out:
   train.npy   the attacker's span corpus, from chunk 0 of books3 /train
               (fetched here: the bootstrap stages only train/zarr.json)
   val.npy     the benign eval: seq_length + 1 tokens from the start of /val
-  probe.npy   the gate's probe window: from /val at --probe-offset, disjoint
+  probe.npy   the gate's probe sequence (seq_length + 1; chunk 0 is the probe
+              window): from /val at --probe-offset, disjoint
               from val.npy by construction
   tokens-manifest.json   offsets, lengths and sha256 of each file
 
@@ -157,7 +158,6 @@ def main(argv: list[str] | None = None) -> int:
                          "<out>/train-zarr, deliberately NOT inside --books3, "
                          "so the 000 baseline's store is never touched.")
     ap.add_argument("--seq-length", type=int, default=mvs.SEQ_LENGTH)
-    ap.add_argument("--mini-batch", type=int, default=1024)
     ap.add_argument("--train-tokens", type=int, default=DEFAULT_TRAIN_TOKENS)
     ap.add_argument("--probe-offset", type=int, default=DEFAULT_PROBE_OFFSET)
     args = ap.parse_args(argv)
@@ -177,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     eval_len = args.seq_length + 1
     if args.probe_offset < eval_len:
         sys.exit("--probe-offset overlaps the eval slice")
-    probe_len = args.mini_batch + 1
+    probe_len = args.seq_length + 1
 
     for name, start, length in (("val", 0, eval_len), ("probe", args.probe_offset, probe_len)):
         tokens = read_slice(val_dir, val_meta, files[0], start, length)

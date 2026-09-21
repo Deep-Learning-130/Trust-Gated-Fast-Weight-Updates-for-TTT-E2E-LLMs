@@ -46,7 +46,7 @@ def run(dump, tmp_path, val, train, **overrides):
     out = tmp_path / "out"
     args = {
         "--books3": books3, "--out": out, "--train-dir": train_root,
-        "--seq-length": 64, "--mini-batch": 16, "--train-tokens": 1000,
+        "--seq-length": 64, "--train-tokens": 1000,
         "--probe-offset": 2000,
     }
     args.update(overrides)
@@ -63,7 +63,7 @@ def test_writes_disjoint_int32_slices_from_the_right_splits(dump, tmp_path):
     v, p, t = (np.load(out / f"{n}.npy") for n in ("val", "probe", "train"))
     assert v.dtype == p.dtype == t.dtype == np.int32
     np.testing.assert_array_equal(v, val[:65])
-    np.testing.assert_array_equal(p, val[2000:2017])
+    np.testing.assert_array_equal(p, val[2000:2065])
     np.testing.assert_array_equal(t, train[:1000])
     assert not set(v) & set(p), "probe overlaps the eval"
 
