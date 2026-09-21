@@ -285,6 +285,15 @@ def run_sequence_eval(
 
         if n_windows is None:
             n_windows = len(poison_windows)
+            if eval_every > n_windows:
+                # Caught here, before any arm runs: otherwise every arm computes
+                # to completion with no measurement, and the report is the first
+                # thing to notice -- after the whole cost has been paid.
+                raise ValueError(
+                    f"eval_every {eval_every} exceeds the {n_windows} windows per "
+                    f"stream, so no window would ever be measured. Use "
+                    f"--eval-every <= {n_windows}."
+                )
         elif n_windows != len(poison_windows):
             raise ValueError(
                 f"seed {seed} produced {len(poison_windows)} windows but an "

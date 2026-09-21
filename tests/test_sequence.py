@@ -326,6 +326,15 @@ def test_ragged_stride_is_refused_rather_than_silently_truncated():
         run(eval_every=0)
 
 
+def test_a_stride_longer_than_the_stream_is_refused_before_any_arm_runs():
+    """Otherwise every arm computes to the end with no measurement, and the
+    report is the first thing to notice -- after the whole cost is paid."""
+    step, calls = make_recording_step()
+    with pytest.raises(ValueError, match="no window would ever be measured"):
+        run(eval_every=N_WINDOWS + 1, step=step)
+    assert not calls, "an arm ran before the stride was checked"
+
+
 def test_no_seeds_is_refused():
     with pytest.raises(ValueError, match="no seeds"):
         run(seeds=[])
