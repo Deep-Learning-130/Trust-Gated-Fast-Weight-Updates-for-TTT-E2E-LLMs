@@ -471,7 +471,7 @@ def sequence_chunks(binding: VendorBinding, tokens, *, bos_token_id: int) -> lis
     return chunk_sequence(binding, seq, prefix_output)
 
 
-def split_stream(tokens, seq_length: int) -> list:
+def split_stream(tokens, seq_length: int, *, lookahead: bool = False) -> list:
     """Cut a flat stream into sequences of `seq_length` loss-bearing positions.
 
     Each sequence needs `seq_length + 1` source tokens (`_to_batch` drops one to
@@ -483,6 +483,18 @@ def split_stream(tokens, seq_length: int) -> list:
     """
     tokens = jnp.asarray(tokens, dtype=jnp.int32)
     n = tokens.shape[0]
+
+    if lookahead:
+        # `CraftedStream.tokens` is `length_tokens + 1` (stream.py, "The window
+        # +1 convention"): the last token is real corpus text, the target for
+        # the final position. Cut `seq_length + 1` windows from real tokens --
+        # the vendor loader's own convention -- and repeat nothing.
+        if n < 2 or (n - 1) % seq_length != 0:
+            raise ValueError(
+                f"lookahead stream of {n} tokens is not seq_length {seq_length} "
+                f"x k + 1; a CraftedStream always is"
+            )
+        return [tokens[s : s + seq_length + 1] for s in range(0, n - 1, seq_length)]
 
     if n % seq_length != 0:
         raise ValueError(

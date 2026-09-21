@@ -350,12 +350,22 @@ def run_stream(
             f"verdict rather than be an implementation detail."
         )
 
+    # Two accepted forms. A `CraftedStream`'s tokens are `stream_tokens + 1`:
+    # the last is the real target of the final position (stream.py, "The
+    # window +1 convention"), and it is how every arm reaches this function via
+    # `make_adapt_and_eval`. A bare flat stream of exactly `stream_tokens` is
+    # the older form, whose final target is a repeat.
     n_tokens = int(np.asarray(stream_tokens).shape[0])
-    if n_tokens != condition.stream_tokens:
+    if n_tokens == condition.stream_tokens + 1:
+        lookahead = True
+    elif n_tokens == condition.stream_tokens:
+        lookahead = False
+    else:
         raise ValueError(
             f"stream is {n_tokens} tokens, condition declares "
-            f"{condition.stream_tokens}. Length is a matched field; an "
-            f"unmatched control makes a null look like a positive."
+            f"{condition.stream_tokens} (+1 for a CraftedStream's lookahead "
+            f"token). Length is a matched field; an unmatched control makes a "
+            f"null look like a positive."
         )
 
     step_fn = vendor_bind.make_step_fn(binding, gate_spec, gate_inputs)
@@ -366,7 +376,9 @@ def run_stream(
     # cheaper to catch here than after a paid run.
     carry_mod.assert_saturated_inner_lr(carry)
 
-    sequences = vendor_bind.split_stream(stream_tokens, condition.seq_length)
+    sequences = vendor_bind.split_stream(
+        stream_tokens, condition.seq_length, lookahead=lookahead
+    )
 
     all_metrics: list[dict] = []
     for tokens in sequences:

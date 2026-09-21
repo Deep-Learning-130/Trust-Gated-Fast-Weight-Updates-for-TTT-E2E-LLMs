@@ -324,7 +324,10 @@ def make_vendor_windows(binding: Any, condition: RunCondition, *, bos_token_id: 
 
     def windows_for(stream: CraftedStream) -> list:
         chunks: list = []
-        for tokens in vendor_bind.split_stream(stream.tokens, condition.seq_length):
+        # `stream.tokens` is `length_tokens + 1` by definition (CraftedStream).
+        for tokens in vendor_bind.split_stream(
+            stream.tokens, condition.seq_length, lookahead=True
+        ):
             chunks.extend(
                 vendor_bind.sequence_chunks(binding, tokens, bos_token_id=bos_token_id)
             )

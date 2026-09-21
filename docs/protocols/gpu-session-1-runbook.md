@@ -224,7 +224,7 @@ proceed past a FAIL. Bar and structural checks are in the Acceptance table below
 git pull                                   # the gate wiring may have landed during 000
 export GCP_BILLING_PROJECT=<project>       # same shell as the bootstrap
 bash scripts/prepare_phase1.sh
-source "$EXP_DIR/phase1.env"               # defines $TG, $T, $CKPT_DEST, $CKPT_MANIFEST
+source "${EXP_DIR:-$HOME/ttt-runs}/phase1.env"   # defines $TG $T $R $EXP_DIR $CKPT_DEST $CKPT_MANIFEST
 ```
 
 **Before this, no interpreter on the box could run the checkpoint CLI.** `trustgate`
@@ -278,7 +278,7 @@ $TG --objective degrade --strategy select \
   --corpus-split train --eval-split val \
   --size 1b --seq-length 8192 --stream-tokens 8192 \
   --seeds 0 1 2 3 4 --max-iters <measured> \
-  --out experiments/001-attack-spike/results
+  --out $R
 ```
 
 Five seeds per condition, SELECT headline, DEGRADE objective, `meta` mode only (enforced in
@@ -299,9 +299,9 @@ search ends**, before the spike itself runs. C4 and C5 re-run exactly those stre
 $TG --objective degrade --strategy select --sequence-eval \
   --checkpoint $CKPT_DEST --checkpoint-manifest $CKPT_MANIFEST \
   --corpus-file $T/train.npy --eval-file $T/val.npy \
-  --arms-file experiments/001-attack-spike/results/arms.pkl \
+  --arms-file $R/arms.pkl \
   --size 1b --seq-length 8192 --seeds 0 1 2 3 4 \
-  --out experiments/001-attack-spike/results/sequence
+  --out $R/sequence
 ```
 
 This renders no verdict line at all, by design, so the two artifacts cannot be confused.
@@ -320,10 +320,10 @@ time is short, run it **after** C5 or with `--eval-every 2`, which halves the co
 $TG --objective degrade --strategy select --gate-eval \
   --checkpoint $CKPT_DEST --checkpoint-manifest $CKPT_MANIFEST \
   --corpus-file $T/train.npy --eval-file $T/val.npy --probe-file $T/probe.npy \
-  --arms-file experiments/001-attack-spike/results/arms.pkl \
+  --arms-file $R/arms.pkl \
   --size 1b --seq-length 8192 --seeds 0 1 2 3 4 \
   --gate-quantiles 0.9 0.99 \
-  --out experiments/001-attack-spike/results/gate
+  --out $R/gate
 ```
 
 This calibrates the anchor gate on a clean, uncrafted corpus slice. It reads thresholds

@@ -286,3 +286,16 @@ def test_make_batch_masks_bos_out_of_the_loss(vendor_bind):
 def test_make_batch_refuses_a_stream_too_short_to_form_a_pair(vendor_bind):
     with pytest.raises(ValueError, match="at least 2 tokens"):
         vendor_bind.make_batch(jnp.asarray([1]), bos_token_id=128000)
+
+
+def test_split_stream_with_lookahead_uses_the_real_final_target(vendor_bind):
+    """A CraftedStream is `length_tokens + 1`; its last token is real text."""
+    seqs = vendor_bind.split_stream(jnp.arange(17), seq_length=8, lookahead=True)
+    assert [s.shape[0] for s in seqs] == [9, 9]
+    assert int(seqs[-1][-1]) == 16, "the lookahead token, not a repeat"
+    assert int(seqs[0][-1]) == int(seqs[1][0])
+
+
+def test_split_stream_with_lookahead_refuses_the_wrong_length(vendor_bind):
+    with pytest.raises(ValueError, match="k \+ 1"):
+        vendor_bind.split_stream(jnp.arange(16), seq_length=8, lookahead=True)

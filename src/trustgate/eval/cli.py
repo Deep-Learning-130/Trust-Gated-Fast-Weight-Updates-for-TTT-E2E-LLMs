@@ -375,6 +375,13 @@ def _synthetic_result(seeds, strategy):
     )
 
 
+#: Split names for the synthetic random-init runs. They must differ: the spike
+#: and sequence harnesses refuse a stream drawn from the benign eval split
+#: (`assert_stream_not_from_eval_split`), and naming both "synthetic" made every
+#: random-init spike and sequence run refuse itself.
+SYNTHETIC_CORPUS = "synthetic-corpus"
+SYNTHETIC_EVAL = "synthetic-eval"
+
 NOT_A_RESULT = (
     "INSTRUMENT VALIDATION -- RANDOM-INIT VICTIM, NOT A RESULT. "
     "This model has learned nothing, so it has nothing worth corrupting. "
@@ -421,7 +428,7 @@ def _random_init_run(args) -> int:
     # BOS is 128000 and is excluded by construction.
     corpus = TokenCorpus(
         dummy_tokens(args.corpus_tokens, seed=7, vocab_lo=10, vocab_hi=50_000),
-        name="synthetic",
+        name=SYNTHETIC_CORPUS,
     )
     eval_tokens = dummy_tokens(args.seq_length + 1, seed=2)
 
@@ -459,7 +466,7 @@ def _random_init_run(args) -> int:
         seed=args.seeds[0],
         seq_length=args.seq_length,
         checkpoint=f"random-init-{args.size} (NO CHECKPOINT)",
-        benign_eval_split="synthetic",
+        benign_eval_split=SYNTHETIC_EVAL,
         eval_tokens_sha256=benign_eval_digest(eval_tokens),
     )
 
@@ -544,7 +551,7 @@ def _sequence_run(args) -> int:
     else:
         arms = None
         eval_tokens = dummy_tokens(args.seq_length + 1, seed=2)
-        eval_split = "synthetic"
+        eval_split = SYNTHETIC_EVAL
 
     cfg, _model, binding, mini_batch, label = _build_victim(args, tag="sequence")
 
@@ -559,7 +566,7 @@ def _sequence_run(args) -> int:
             )
         corpus = TokenCorpus(
             dummy_tokens(args.corpus_tokens, seed=7, vocab_lo=10, vocab_hi=50_000),
-            name="synthetic",
+            name=SYNTHETIC_CORPUS,
         )
         pairs = generate_seed_pairs(
             corpus,
@@ -672,7 +679,7 @@ def _gate_run(args) -> int:
 
     if arms is None:
         corpus = TokenCorpus(
-            corpus_tokens, name=args.corpus_split if args.checkpoint else "synthetic"
+            corpus_tokens, name=args.corpus_split if args.checkpoint else SYNTHETIC_CORPUS
         )
         pairs = generate_seed_pairs(
             corpus, args.stream_tokens, list(args.seeds), craft_fn=None,
@@ -684,7 +691,7 @@ def _gate_run(args) -> int:
         arms_source = f"crafted by the 001 search ({args.arms_file})"
 
     eval_digest = benign_eval_digest(eval_tokens)
-    eval_split = args.eval_split if args.checkpoint else "synthetic"
+    eval_split = args.eval_split if args.checkpoint else SYNTHETIC_EVAL
 
     def condition_for(stream, seed):
         return RunCondition.from_stream(
