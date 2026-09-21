@@ -452,6 +452,16 @@ RUN_LOG="\${RUN_LOG:-$EXP_DIR/logs/$exp_name-\$(date -u +%Y%m%dT%H%M%SZ).log}"
 mkdir -p "\$(dirname "\$RUN_LOG")"
 export PYTHONUNBUFFERED=1
 
+# The key goes in through the environment and a private netrc, and
+# training.wandb_key is passed EMPTY. wandb 0.19.9 (the vendor lock) raises
+# "API key must be 40 characters long" in wandb.login(key=...), and W&B now issues
+# 86-character wandb_v1_ keys. With an empty key that version skips the check and
+# reads WANDB_API_KEY; wandb.init's backend reads the netrc (without it, it panics).
+# Works unchanged for old 40-character keys, and keeps the key off the command line.
+export WANDB_API_KEY="\$WANDB_KEY"
+export NETRC="$EXP_DIR/bootstrap/wandb.netrc"
+( umask 077; printf 'machine api.wandb.ai\n  login user\n  password %s\n' "\$WANDB_KEY" > "\$NETRC" )
+
 cd "$repo_root/vendor/ttt-e2e"
 
 echo "run log: \$RUN_LOG"
@@ -471,7 +481,7 @@ uv run --exact train \\
   backend.compilation_cache_dir=$CACHE_DIR \\
   training.wandb_entity=$WANDB_ENTITY \\
   training.wandb_project=$WANDB_PROJECT \\
-  training.wandb_key="\$WANDB_KEY" $* 2>&1 | tee "\$RUN_LOG"
+  training.wandb_key= $* 2>&1 | tee "\$RUN_LOG"
 
 # A zero exit with no loss line is not a result.
 if ! grep -q "Eval -- train_holdout/loss:" "\$RUN_LOG"; then
