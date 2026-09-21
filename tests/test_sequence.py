@@ -560,6 +560,8 @@ def vendor_bind(monkeypatch):
 
     for name, mod in mods.items():
         monkeypatch.setitem(sys.modules, name, mod)
+    # The fake step reads a concrete loss (`float(...)`), so it runs eagerly.
+    monkeypatch.setenv("TRUSTGATE_NO_JIT", "1")
 
     from trustgate.eval import vendor_bind as vb
 

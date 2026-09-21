@@ -39,7 +39,7 @@
 > adapt-and-eval: roughly **16 inner steps plus 2 prefix passes** at 8192/1024. With
 > `--max-iters 40` and 5 seeds that is ~3,280 inner steps at 1B, plus a GPT-2 scoring of
 > both arms per proposal. **This is the dominant cost of the session and nothing has ever
-> timed it.** Step C3 measures one evaluation and sets the budget from that number. Do not
+> timed it.** Step C2 measures one evaluation and sets the budget from that number. Do not
 > start the search on a guess.
 
 ---
@@ -176,12 +176,13 @@ cd TTT && git checkout infra/gpu-session-1
 
 ```bash
 export WANDB_ENTITY=…  WANDB_PROJECT=…  WANDB_KEY=…
+export GCP_BILLING_PROJECT=<Jaykay's project id>   # the bootstrap requires it for the requester-pays reads
 bash scripts/bootstrap_gpu_box.sh
 ```
 
-The script's `GCP_SA_KEY` / `gcloud auth activate-service-account` path is **stale** and is
-being rewritten alongside this document; in-project it should verify ambient credentials
-and skip activation entirely. **Keep its check at `:329-344`**: the checkpoint directory
+**Leave `GCP_SA_KEY` unset.** On a GCE VM the instance's default service account is
+already the active gcloud account, so the script's active-account check at `:176` passes
+without a key. The key path is left over from the old route and is dead in-project. **Keep its check at `:329-344`**: the checkpoint directory
 must contain an integer-named step directory, or orbax reports "No checkpoints found",
 which reads like a missing checkpoint rather than a wrong path.
 
@@ -217,11 +218,36 @@ DEADLINE_HOURS=2.5 bash scripts/run_gpu_session.sh
 measured afterwards is unattributable** — it might be our own misconfiguration. Do not
 proceed past a FAIL. Bar and structural checks are in the Acceptance table below.
 
+### C1b. Pull the gate code and dump the token files (after 000 PASS)
+
+```bash
+git pull                                            # the gate wiring may have landed during 000
+source "$EXP_DIR/bootstrap/session.env"             # BOOKS3_LOCAL, CKPT_DEST, CKPT_MANIFEST
+( cd vendor/ttt-e2e && uv run python ../../scripts/dump_tokens.py     --books3 "$BOOKS3_LOCAL" --billing "$GCP_BILLING_PROJECT" --out "$EXP_DIR/tokens" )
+T=$EXP_DIR/tokens
+```
+
+Writes `train.npy` (attacker corpus, /train chunk 0), `val.npy` (the benign eval, one
+8193-token sequence), `probe.npy` (the gate's probe window, disjoint from the eval) and
+`tokens-manifest.json`. It refuses a constant slice, which is the zarr fill-value trap.
+
+**Then prove the gate compiles on the real vendor, for free, before any real run:**
+
+```bash
+python -m trustgate.eval.cli --objective degrade --strategy select --gate-eval   --random-init --size 125m --stream-tokens 8192 --seeds 0 1   --overhead-repeats 3 --out /tmp/gate-smoke
+```
+
+Banner-marked instrument validation. It has to finish with `gate.md` and a
+**non-zero** divergence range under Calibration. All-zero or all-unscorable means the
+probe forward is wrong, so stop and fix it before C5. The inner step is now compiled
+with `eqx.filter_jit`. If a trace fails, `TRUSTGATE_NO_JIT=1` runs it eagerly for
+diagnosis only; never time anything under it.
+
 ### C2. Measure one adapt-and-eval before budgeting the search
 
-Run the spike at `--max-iters 1` and time it. Multiply by seeds × proposals. **Choose
-`--max-iters` from that number**, not from `run_deep.py`'s 40, which was picked on CPU
-against a tiny model and does not transfer.
+Run the C3 command below with `--seeds 0 --max-iters 1` and time it. Multiply by
+seeds × proposals. **Choose `--max-iters` from that number**, not from `run_deep.py`'s
+40, which was picked on CPU against a tiny model and does not transfer.
 
 ### C3. 001 kill gate
 
@@ -229,7 +255,7 @@ against a tiny model and does not transfer.
 python -m trustgate.eval.cli \
   --objective degrade --strategy select \
   --checkpoint <dir> --checkpoint-manifest <manifest> \
-  --corpus-file <train.npy> --eval-file <val.npy> \
+  --corpus-file $T/train.npy --eval-file $T/val.npy \
   --corpus-split train --eval-split val \
   --size 1b --seq-length 8192 --stream-tokens 8192 \
   --seeds 0 1 2 3 4 --max-iters <measured> \
@@ -250,11 +276,27 @@ null, not retried at a kinder setting.
 Add `--sequence-eval`. Renders no verdict line at all, by design, so the two artifacts
 cannot be confused.
 
+C3 writes `arms.pkl` (the crafted streams, by seed) into its `--out` **the moment the
+search ends**, before the spike itself runs. C5 re-runs exactly those streams.
+
 ### C5. Phase 2 gate measurement
 
-`clean_regression`, and gate overhead against the ≤10% budget via
-`trustgate.eval.overhead`. **Report the overhead number, not just the pass/fail bool** —
-a marginal pass is inside the noise of any wall-clock measurement.
+```bash
+python -m trustgate.eval.cli   --objective degrade --strategy select --gate-eval   --checkpoint <dir> --checkpoint-manifest <manifest>   --corpus-file $T/train.npy --eval-file $T/val.npy --probe-file $T/probe.npy   --arms-file experiments/001-attack-spike/results/arms.pkl   --size 1b --seq-length 8192 --seeds 0 1 2 3 4   --gate-quantiles 0.9 0.99   --out experiments/001-attack-spike/results/gate
+```
+
+This calibrates the anchor gate on a clean, uncrafted corpus slice. It reads thresholds
+off that slice's divergence quantiles, and those are **pre-verdict operating points, not
+tuned values**. Then it measures, into `gate.md`:
+- gate overhead against the ~10% budget (median of 20, compiled, warm);
+- `clean_regression` on the control arms at each threshold;
+- gated vs ungated corruption (d, relative degradation) and acceptance rates on the 001
+  arms.
+
+Cost: seeds × 2 arms × (1 + number of thresholds) adapt-and-evals, with no search. Budget
+it from the C2 timing. **Report the overhead number, not just the pass/fail bool**: a
+marginal pass is inside the noise of any wall-clock measurement. The probe set is fixed,
+not rotating, and `gate.md` says so.
 
 Bounded drift is **not** measured here and must not be reported as enforced: there is no
 carry slot for the accumulator (ADR-003 correction, ADR-P3-1).

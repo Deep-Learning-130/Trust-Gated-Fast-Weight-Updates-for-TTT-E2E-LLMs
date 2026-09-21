@@ -367,3 +367,108 @@ def write_sequence_report(
         render_sequence_markdown(result, onset_delta=onset_delta), encoding="utf-8"
     )
     return path
+
+
+# ------------------------------------------------------------ Phase 2 gate ---
+
+GATE_NOT_A_VERDICT = (
+    "PHASE 2 GATE MEASUREMENT -- NOT A VERDICT. The PROCEED/STOP decision comes "
+    "only from the 001 spike report. Thresholds are pre-verdict operating "
+    "points read off one clean stream, not tuned values. Bounded drift is NOT "
+    "enforced (ADR-003 correction, ADR-P3-1). The probe set is fixed, not "
+    "rotating."
+)
+
+
+def _corruption_cells(arms) -> str:
+    try:
+        c = arms.corruption
+    except ValueError as exc:  # degenerate variance, too few seeds
+        return f"n/a ({exc}) | n/a"
+    return f"{c.effect_size:+.3f} | {c.relative_degradation * 100:+.2f}%"
+
+
+def _mean(values) -> str:
+    import math
+
+    finite = [v for v in values if not math.isnan(v)]
+    return f"{sum(finite) / len(finite):.4f}" if finite else "nan"
+
+
+def render_gate_markdown(result) -> str:
+    """Render a `gate_eval.GateEvalResult`. Numbers first; no pass/fail line."""
+    cal = result.calibration
+    lines = [
+        "# Phase 2 gate measurement",
+        "",
+        f"> **{GATE_NOT_A_VERDICT}**",
+        "",
+        f"- checkpoint: `{result.checkpoint}`",
+        f"- divergence: `{result.divergence}` against theta_0",
+        f"- seeds: {', '.join(str(s) for s in result.seeds)}",
+        "",
+        "## Overhead (ADR-F1 s5.1 budget: ~10% of the per-window update cost)",
+        "",
+    ]
+    if result.overhead is None:
+        lines.append("Not measured in this run.")
+    else:
+        o = result.overhead
+        lines += [
+            f"- ungated step: {o.ungated_seconds * 1e3:.3f} ms (median of {o.repeats})",
+            f"- gated step:   {o.gated_seconds * 1e3:.3f} ms",
+            f"- **overhead: {o.overhead_fraction * 100:+.1f}%**",
+            "",
+            "Quote the number, not the bool: a result near 10% is inside "
+            "wall-clock noise.",
+        ]
+    lines += [
+        "",
+        "## Calibration",
+        "",
+        f"- scorable steps on the clean stream: {len(cal.divergences)}",
+        f"- unscorable (nan) steps: {cal.unscorable_steps}",
+        f"- divergence min / median / max: {min(cal.divergences):.6g} / "
+        f"{sorted(cal.divergences)[len(cal.divergences) // 2]:.6g} / "
+        f"{max(cal.divergences):.6g}",
+        "",
+        "## Arms",
+        "",
+        "Corruption is Cohen's d and relative degradation, poison vs control, "
+        "across seeds -- the 001 metric, recomputed here on the same streams. "
+        "clean_regression is gated vs ungated benign loss on the control arms; "
+        "positive means the gate cost clean performance.",
+        "",
+        "| arm | threshold | mean poisoned | mean control | d | rel. degradation "
+        "| accept (poison) | accept (control) | clean_regression |",
+        "|---|---|---|---|---|---|---|---|---|",
+        f"| ungated | -- | {_mean(result.ungated.poisoned)} | "
+        f"{_mean(result.ungated.control)} | {_corruption_cells(result.ungated)} "
+        f"| 1.000 | 1.000 | -- |",
+    ]
+    for t in result.thresholds:
+        lines.append(
+            f"| gated q{t.quantile:g} | {t.threshold:.6g} | {_mean(t.arms.poisoned)} | "
+            f"{_mean(t.arms.control)} | {_corruption_cells(t.arms)} | "
+            f"{_mean(t.arms.poison_accept_rate)[:5]} | "
+            f"{_mean(t.arms.control_accept_rate)[:5]} | "
+            f"{t.clean_regression * 100:+.2f}% |"
+        )
+    lines += ["", "## Per seed", ""]
+    header = "| seed | ungated P | ungated C |" + "".join(
+        f" q{t.quantile:g} P | q{t.quantile:g} C |" for t in result.thresholds
+    )
+    lines += [header, "|" + "---|" * (3 + 2 * len(result.thresholds))]
+    for i, seed in enumerate(result.seeds):
+        row = f"| {seed} | {result.ungated.poisoned[i]:.4f} | {result.ungated.control[i]:.4f} |"
+        for t in result.thresholds:
+            row += f" {t.arms.poisoned[i]:.4f} | {t.arms.control[i]:.4f} |"
+        lines.append(row)
+    return "\n".join(lines) + "\n"
+
+
+def write_gate_report(result, path: Path) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_gate_markdown(result), encoding="utf-8")
+    return path

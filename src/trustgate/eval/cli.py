@@ -20,6 +20,7 @@ Thresholds come from `trustgate.eval.prereg.FROZEN`, which CI pins to
 from __future__ import annotations
 
 import argparse
+import pickle
 import sys
 from pathlib import Path
 
@@ -226,6 +227,50 @@ def build_parser() -> argparse.ArgumentParser:
             "Reported sensitivity for the onset metric, in nats/token. Not a "
             "bar -- it is printed next to every onset it produces."
         ),
+    )
+    parser.add_argument(
+        "--gate-eval",
+        action="store_true",
+        help=(
+            "Run the PHASE 2 gate measurement instead of the spike: calibrate "
+            "the anchor gate on a clean stream, then measure overhead, "
+            "clean_regression and gated vs ungated corruption on the 001 arms. "
+            "Renders NO verdict. With --checkpoint it needs --arms-file (the "
+            "arms.pkl the spike run writes) and --probe-file."
+        ),
+    )
+    parser.add_argument(
+        "--arms-file",
+        type=Path,
+        default=None,
+        help="arms.pkl written by the checkpoint spike run: the crafted streams, by seed.",
+    )
+    parser.add_argument(
+        "--probe-file",
+        type=Path,
+        default=None,
+        help=(
+            ".npy of held-out int32 token ids for the gate's probe window. "
+            "Must not overlap --eval-file; scripts/dump_tokens.py writes both."
+        ),
+    )
+    parser.add_argument(
+        "--gate-quantiles",
+        type=float,
+        nargs="+",
+        default=[0.9, 0.99],
+        help="Clean-stream divergence quantiles to use as thresholds. Pre-verdict guesses.",
+    )
+    parser.add_argument(
+        "--divergence",
+        default="symmetric_kl",
+        help="Anchor-gate divergence. See trustgate.gate.anchor.DIVERGENCES.",
+    )
+    parser.add_argument(
+        "--overhead-repeats",
+        type=int,
+        default=20,
+        help="Timed repeats per arm for the gate overhead. 0 skips it.",
     )
     parser.add_argument(
         "--fluency-selftest",
@@ -523,6 +568,140 @@ def _sequence_run(args) -> int:
     return 0
 
 
+def _gate_run(args) -> int:
+    """Drive the Phase 2 gate measurement. See `trustgate.eval.gate_eval`.
+
+    Against a checkpoint it re-runs the 001 spike's own crafted streams, loaded
+    from `--arms-file`, so gated and ungated are measured on exactly the
+    orderings the attacker found. Against --random-init it uses random
+    orderings and is instrument validation only.
+    """
+    import numpy as np
+
+    from trustgate.attack.corpus import TokenCorpus
+    from trustgate.attack.stream import generate_seed_pairs
+    from trustgate.eval import gate_eval, vendor_bind
+    from trustgate.eval.harness import (
+        RunCondition,
+        eval_tokens_digest,
+        make_adapt_and_eval,
+        model_bos_token_id,
+        run_stream,
+    )
+    from trustgate.eval.model_build import dummy_tokens
+    from trustgate.eval.report import GATE_NOT_A_VERDICT, write_gate_report
+    from trustgate.gate.anchor import DIVERGENCES
+
+    if args.divergence not in DIVERGENCES:
+        raise SystemExit(f"--divergence must be one of {', '.join(DIVERGENCES)}")
+
+    if args.checkpoint:
+        missing = [
+            flag
+            for flag, value in (
+                ("--arms-file", args.arms_file),
+                ("--probe-file", args.probe_file),
+            )
+            if value is None
+        ]
+        if missing:
+            raise SystemExit(
+                f"--gate-eval against a checkpoint needs {', '.join(missing)}: "
+                f"the arms are the spike's crafted streams (arms.pkl in its "
+                f"--out), and the probe window must be held out from the eval."
+            )
+        if Path(args.probe_file).resolve() == Path(args.eval_file).resolve():
+            raise SystemExit("--probe-file and --eval-file are the same file")
+        with Path(args.arms_file).open("rb") as fh:
+            arms = pickle.load(fh)
+        absent = [s for s in args.seeds if s not in arms]
+        if absent:
+            raise SystemExit(f"--arms-file has no arms for seeds {absent}")
+        eval_tokens = _load_tokens(Path(args.eval_file), "--eval-file")
+        probe_tokens = _load_tokens(Path(args.probe_file), "--probe-file")
+        corpus_tokens = _load_tokens(Path(args.corpus_file), "--corpus-file")
+    else:
+        eval_tokens = dummy_tokens(args.seq_length + 1, seed=2)
+        probe_tokens = dummy_tokens(args.seq_length + 1, seed=3)
+        corpus_tokens = dummy_tokens(args.corpus_tokens, seed=7, vocab_lo=10, vocab_hi=50_000)
+        arms = None
+
+    cfg, model, binding, mini_batch, label = _build_victim(args, tag="gate")
+    bos = model_bos_token_id(binding)
+
+    if arms is None:
+        corpus = TokenCorpus(corpus_tokens, name="synthetic")
+        pairs = generate_seed_pairs(
+            corpus, args.stream_tokens, list(args.seeds), craft_fn=None,
+            mini_batch_size=mini_batch,
+        )
+        arms = dict(zip(args.seeds, pairs))
+
+    eval_digest = eval_tokens_digest(eval_tokens)
+    eval_split = args.eval_split if args.checkpoint else "synthetic"
+
+    def condition_for(stream, seed):
+        return RunCondition.from_stream(
+            stream,
+            seed=seed,
+            seq_length=args.seq_length,
+            checkpoint=label,
+            benign_eval_split=eval_split,
+            eval_tokens_sha256=eval_digest,
+        )
+
+    # The clean calibration stream: a contiguous, uncrafted slice of the corpus,
+    # the same length as the arms, so its step count matches theirs.
+    first_poison, first_control = arms[args.seeds[0]]
+    n = int(np.asarray(first_poison.tokens).shape[0])
+    if corpus_tokens.shape[0] < n:
+        raise SystemExit(f"corpus has {corpus_tokens.shape[0]} tokens; calibration needs {n}")
+    calib_tokens = np.asarray(corpus_tokens[-n:], dtype="int32")
+    calib_condition = condition_for(first_control, args.seeds[0])
+
+    def calibrate_stream_fn(**gate_kwargs):
+        return run_stream(model, calib_tokens, calib_condition, binding=binding, **gate_kwargs)
+
+    def adapt_and_eval_for(**gate_kwargs):
+        return make_adapt_and_eval(binding, eval_tokens, model=model, **gate_kwargs)
+
+    gate_inputs = gate_eval.make_gate_inputs(binding, probe_tokens, bos_token_id=bos)
+
+    overhead_fn = None
+    if args.overhead_repeats > 0:
+        chunk = vendor_bind.sequence_chunks(binding, eval_tokens, bos_token_id=bos)[0]
+
+        def overhead_fn(spec):
+            return gate_eval.measure_step_overhead(
+                binding, chunk, spec, gate_inputs, repeats=args.overhead_repeats
+            )
+
+    result = gate_eval.run_gate_eval(
+        seeds=list(args.seeds),
+        build_arms=arms.__getitem__,
+        adapt_and_eval_for=adapt_and_eval_for,
+        condition_for=condition_for,
+        calibrate_stream_fn=calibrate_stream_fn,
+        gate_inputs=gate_inputs,
+        quantiles=list(args.gate_quantiles),
+        divergence=args.divergence,
+        checkpoint=label,
+        overhead_fn=overhead_fn,
+    )
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    with (out / "gate-result.pkl").open("wb") as fh:
+        pickle.dump(result, fh)
+    report_path = write_gate_report(result, out / "gate.md")
+    if not args.checkpoint:
+        _banner_report(report_path, NOT_A_RESULT)
+
+    print(f"\n[gate] {GATE_NOT_A_VERDICT}")
+    print(report_path.read_text(encoding="utf-8"))
+    return 0
+
+
 def _load_tokens(path: Path, what: str):
     """Load a saved token array, refusing anything that is not one.
 
@@ -745,6 +924,15 @@ def _checkpoint_run(args) -> int:
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    # Written the moment the search ends, before anything else can crash: the
+    # search is the session's dominant cost, and the Phase 2 gate measurement
+    # (--gate-eval --arms-file) re-runs these exact streams rather than
+    # searching again.
+    arms_path = out / "arms.pkl"
+    with arms_path.open("wb") as fh:
+        pickle.dump(arms, fh)
+    print(f"[run] crafted arms saved to {arms_path}")
+
     result = run_attack_spike(
         spec,
         condition,
@@ -794,6 +982,15 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
+    if args.gate_eval and args.sequence_eval:
+        raise SystemExit("--gate-eval and --sequence-eval are separate runs; pick one.")
+
+    if args.gate_eval and not (args.random_init or args.checkpoint):
+        raise SystemExit(
+            "--gate-eval needs a victim: --random-init for instrument "
+            "validation, or --checkpoint with --arms-file for the real measurement."
+        )
+
     if args.sequence_eval and not (args.random_init or args.checkpoint):
         raise SystemExit(
             "--sequence-eval needs a victim. Pair it with --random-init for "
@@ -812,6 +1009,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"the orderings here are random; see the note in _random_init_run.",
                 file=sys.stderr,
             )
+        if args.gate_eval:
+            return _gate_run(args)
         return _sequence_run(args) if args.sequence_eval else _random_init_run(args)
 
     if args.checkpoint:
@@ -836,6 +1035,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"Measuring degradation on the split the stream was drawn from "
                 f"is named as an invalidating condition in PREREGISTERED.md."
             )
+        if args.gate_eval:
+            return _gate_run(args)
         return _sequence_run(args) if args.sequence_eval else _checkpoint_run(args)
 
     if not args.dry_run:

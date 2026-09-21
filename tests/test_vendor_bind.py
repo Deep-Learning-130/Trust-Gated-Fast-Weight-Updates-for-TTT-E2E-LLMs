@@ -102,6 +102,9 @@ def _install_fake_vendor(monkeypatch):
 
     for name, mod in mods.items():
         monkeypatch.setitem(sys.modules, name, mod)
+    # These fakes read concrete values (`float(...)`), so they run eagerly.
+    # The compiled path has its own trace-safe fake in tests/test_gate_eval.py.
+    monkeypatch.setenv("TRUSTGATE_NO_JIT", "1")
 
 
 @pytest.fixture

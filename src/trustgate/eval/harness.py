@@ -281,7 +281,17 @@ class BenignEvalResult:
         return self.per_chunk_loss[-1] - self.per_chunk_loss[0]
 
 
-def run_stream(model, stream_tokens, condition: RunCondition, *, state=None, binding=None):
+def run_stream(
+    model,
+    stream_tokens,
+    condition: RunCondition,
+    *,
+    state=None,
+    binding=None,
+    gate_spec=None,
+    gate_inputs=None,
+    metrics_out: list | None = None,
+):
     """Feed one stream through TTT-E2E, returning the adapted fast weights.
 
     Runs with `train_mode="meta"` -- the only mode with an inner loop. In
@@ -303,6 +313,10 @@ def run_stream(model, stream_tokens, condition: RunCondition, *, state=None, bin
         state: the model's `equinox.nn.State`. Required unless `binding` is.
         binding: a prebuilt `VendorBinding`, so a multi-seed run pays the block
             split and prefix setup once rather than per stream.
+        gate_spec, gate_inputs: run with the trust gate in the inner step. See
+            `vendor_bind.make_step_fn`; `None` is the vendor step unmodified.
+        metrics_out: if given, every inner step's metrics dict is appended to
+            it -- how the gate's per-step `gate/*` values reach the caller.
     """
     from trustgate.eval import vendor_bind
 
@@ -331,7 +345,7 @@ def run_stream(model, stream_tokens, condition: RunCondition, *, state=None, bin
             f"unmatched control makes a null look like a positive."
         )
 
-    step_fn = vendor_bind.make_step_fn(binding)
+    step_fn = vendor_bind.make_step_fn(binding, gate_spec, gate_inputs)
     carry = binding.init_carry()
 
     # Asserted *before* anything runs. An unsaturated inner LR means a
@@ -356,6 +370,8 @@ def run_stream(model, stream_tokens, condition: RunCondition, *, state=None, bin
             f"step count is only identical across arms if this matches."
         )
 
+    if metrics_out is not None:
+        metrics_out.extend(all_metrics)
     return carry
 
 
@@ -374,6 +390,9 @@ def eval_benign_curve(
     carry,
     eval_tokens,
     condition: RunCondition,
+    *,
+    gate_spec=None,
+    gate_inputs=None,
 ) -> BenignEvalResult:
     """Benign-task loss for a model carrying adapted fast weights.
 
@@ -404,7 +423,10 @@ def eval_benign_curve(
             "held-out tokens."
         )
 
-    step_fn = vendor_bind.make_step_fn(binding)
+    # A gated arm stays gated through eval: a deployed gate does not switch off
+    # while the model adapts on the benign task, and the carry it hands over
+    # was produced under it.
+    step_fn = vendor_bind.make_step_fn(binding, gate_spec, gate_inputs)
     chunks = vendor_bind.sequence_chunks(
         binding, eval_tokens, bos_token_id=model_bos_token_id(binding)
     )
@@ -439,9 +461,13 @@ def _loss_metric_key(metrics: dict):
     )
 
 
-def eval_benign(binding, carry, eval_tokens, condition: RunCondition) -> float:
+def eval_benign(
+    binding, carry, eval_tokens, condition: RunCondition, *, gate_spec=None, gate_inputs=None
+) -> float:
     """Mean benign loss. See `eval_benign_curve` for the decay curve."""
-    return eval_benign_curve(binding, carry, eval_tokens, condition).mean_loss
+    return eval_benign_curve(
+        binding, carry, eval_tokens, condition, gate_spec=gate_spec, gate_inputs=gate_inputs
+    ).mean_loss
 
 
 def make_adapt_and_eval(
@@ -449,6 +475,9 @@ def make_adapt_and_eval(
     eval_tokens,
     *,
     model=None,
+    gate_spec=None,
+    gate_inputs=None,
+    metrics_out: list | None = None,
 ) -> Callable[[CraftedStream, RunCondition], float]:
     """Build the `adapt_and_eval` callable `run_attack_spike` injects.
 
@@ -459,8 +488,18 @@ def make_adapt_and_eval(
     """
 
     def adapt_and_eval(stream: CraftedStream, condition: RunCondition) -> float:
-        carry = run_stream(model, stream.tokens, condition, binding=binding)
-        return eval_benign(binding, carry, eval_tokens, condition)
+        carry = run_stream(
+            model,
+            stream.tokens,
+            condition,
+            binding=binding,
+            gate_spec=gate_spec,
+            gate_inputs=gate_inputs,
+            metrics_out=metrics_out,
+        )
+        return eval_benign(
+            binding, carry, eval_tokens, condition, gate_spec=gate_spec, gate_inputs=gate_inputs
+        )
 
     return adapt_and_eval
 

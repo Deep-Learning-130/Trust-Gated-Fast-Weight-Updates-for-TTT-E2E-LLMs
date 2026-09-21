@@ -56,6 +56,7 @@ tests on every machine that is not a provisioned GPU box.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -281,34 +282,104 @@ def bind(model, state, *, pin_step_index: bool = True) -> VendorBinding:
     )
 
 
-def make_step_fn(binding: VendorBinding) -> Callable:
+#: Set to 1 to run the inner step eagerly, op by op. An escape hatch for
+#: debugging a trace failure on the box, not a mode to measure in: at 1B an
+#: eager step is dispatch-bound and every timing taken under it is fiction.
+NO_JIT_ENV = "TRUSTGATE_NO_JIT"
+
+#: One compiled inner step per gate spec (None = ungated). `run_stream` and
+#: `eval_benign_curve` call `make_step_fn` once per arm, and a fresh
+#: `filter_jit` per call would recompile the whole graph for every stream.
+_STEP_CACHE: dict = {}
+
+
+def _jit_enabled() -> bool:
+    return os.environ.get(NO_JIT_ENV, "0") != "1"
+
+
+def _step_core(gate_spec):
+    """`process_suffix_chunk` as a pure function of its arrays.
+
+    Everything the step reads is an *argument*, never a closure. `filter_jit`
+    bakes closed-over arrays into the compiled program as constants, which for
+    `model_outer` would mean a copy of the whole model inside the executable.
+    The gate is built inside the trace from `gate_inputs` for the same reason:
+    its anchor and probes are arrays, and only `gate_spec` -- hashable scalars
+    -- is allowed to be static.
+    """
+    from trustgate.interceptor import make_gated_inner_loop_step
+
+    def core(model_outer, spec_inner, gate_inputs, fast_weights, opt_state, state_tuple, chunk):
+        _Batch, _tree_slice, _Split, MetaModel, _spec, _clone = _require_vendor()
+        suffix_chunk, prefix_chunk = chunk
+
+        # transformer.py:696-698 -- outer params from the frozen reference.
+        _, outer_params = eqx.partition(model_outer, spec_inner)
+        model_inner = eqx.combine(fast_weights, outer_params)
+
+        # transformer.py:700-702 -- called unbound, exactly as the vendor does.
+        step = MetaModel.inner_loop_step
+        if gate_spec is not None:
+            step = make_gated_inner_loop_step(
+                step, gate_spec.build(model_outer, spec_inner, gate_inputs)
+            )
+        result = step(model_inner, opt_state, state_tuple, suffix_chunk, prefix_chunk)
+
+        # `inner_loop_step` returns a whole MetaModel via `filter_apply_updates`
+        # (`filter_utils.py:189`); narrow it back to the inner subtree so the
+        # carry holds fast weights and not a model.
+        new_fast_weights, _ = eqx.partition(result.new_model, spec_inner)
+        return InnerStepResult(
+            fast_weights=new_fast_weights,
+            opt_state=result.new_optimizer_state,
+            state_tuple=result.new_state,
+            metrics=result.metrics,
+        )
+
+    return core
+
+
+def make_step_fn(binding: VendorBinding, gate_spec=None, gate_inputs=None) -> Callable:
     """The injected seam `carry.run_chunks` expects, backed by the real vendor.
 
     This is `process_suffix_chunk` (`transformer.py:694-714`) with the carry
     returned instead of discarded. Chunks are `(suffix_chunk, prefix_chunk)`
     pairs, as the vendor's scan `xs` supplies them at `:713`.
+
+    Compiled with `eqx.filter_jit`. The vendor runs this step inside
+    `filter_jit` + `scan`; run eagerly, a 1B step dispatches thousands of
+    primitives one at a time and the ordering search multiplies that by every
+    proposal.
+
+    Args:
+        gate_spec: `None` for the vendor step unmodified. Otherwise a hashable
+            object with `build(model_outer, spec_inner, gate_inputs) -> Gate`
+            (see `trustgate.eval.gate_eval.AnchorGateSpec`). Passed as a value
+            rather than installed with `vendor_patch.install_gate`: a class
+            patch is invisible to a jit cache, so a gated and an ungated run in
+            one process would silently share whichever graph compiled first.
+        gate_inputs: the gate's arrays, threaded through as a jit argument.
     """
-    _Batch, _tree_slice, _Split, MetaModel, _spec, _clone = _require_vendor()
+    if gate_spec is None and gate_inputs is not None:
+        raise ValueError("gate_inputs given without a gate_spec")
+
+    if _jit_enabled():
+        core = _STEP_CACHE.get(gate_spec)
+        if core is None:
+            core = eqx.filter_jit(_step_core(gate_spec))
+            _STEP_CACHE[gate_spec] = core
+    else:
+        core = _step_core(gate_spec)
 
     def step_fn(fast_weights, opt_state, state_tuple, chunk) -> InnerStepResult:
-        suffix_chunk, prefix_chunk = chunk
-
-        # transformer.py:696-698.
-        model_inner = binding.combine(fast_weights)
-
-        # transformer.py:700-702 -- called unbound, exactly as the vendor does.
-        result = MetaModel.inner_loop_step(
-            model_inner, opt_state, state_tuple, suffix_chunk, prefix_chunk
-        )
-
-        return InnerStepResult(
-            # `inner_loop_step` returns a whole MetaModel via
-            # `filter_apply_updates` (`filter_utils.py:189`); narrow it back to
-            # the inner subtree so the carry holds fast weights and not a model.
-            fast_weights=binding.fast_weights(result.new_model),
-            opt_state=result.new_optimizer_state,
-            state_tuple=result.new_state,
-            metrics=result.metrics,
+        return core(
+            binding.model_outer,
+            binding.spec_inner,
+            gate_inputs,
+            fast_weights,
+            opt_state,
+            state_tuple,
+            chunk,
         )
 
     return step_fn
@@ -347,13 +418,21 @@ def prefix_pass(binding: VendorBinding, seq) -> jnp.ndarray:
     MLP, so the prefix contributes no fast weights, and re-running it per chunk
     would be both wrong (it needs full-sequence context) and wasteful.
     """
-    xt_embed = binding.model_split.language_model.wte_call(seq.input_ids)
-    return binding.model_split.language_model.prefix_call(
-        binding.model_split.language_model.model.h.prefix_blocks,
+    core = _prefix_jit if _jit_enabled() else _prefix_core
+    return core(binding.model_split, binding.state_prefix, seq)
+
+
+def _prefix_core(model_split, state_prefix, seq) -> jnp.ndarray:
+    xt_embed = model_split.language_model.wte_call(seq.input_ids)
+    return model_split.language_model.prefix_call(
+        model_split.language_model.model.h.prefix_blocks,
         xt_embed,
-        binding.state_prefix,
+        state_prefix,
         seq,
     ).last_hidden_state
+
+
+_prefix_jit = eqx.filter_jit(_prefix_core)
 
 
 def chunk_sequence(binding: VendorBinding, seq, prefix_output) -> list:
