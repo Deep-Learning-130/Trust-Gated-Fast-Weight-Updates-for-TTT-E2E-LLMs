@@ -53,6 +53,19 @@ def eval_tokens_digest(tokens) -> str:
     return hashlib.sha256(np.ascontiguousarray(tokens, dtype=np.int32).tobytes()).hexdigest()
 
 
+def benign_eval_digest(eval_tokens) -> str:
+    """The digest `eval_benign_curve` checks: every token but the last.
+
+    A benign eval sequence is `seq_length + 1` source tokens and the last one is
+    only ever a target (`make_batch`'s input/target shift). This is the one
+    place that convention lives. Build `RunCondition.eval_tokens_sha256` from
+    this, never from `eval_tokens_digest(eval_tokens)` on the full array: the
+    two differ by one token, and a mismatch refuses every benign eval -- which
+    on the box is the first adapt-and-eval of a billed run.
+    """
+    return eval_tokens_digest(np.asarray(eval_tokens)[:-1])
+
+
 @dataclass(frozen=True)
 class RunCondition:
     """Everything that must match between poison and control runs.
@@ -413,7 +426,7 @@ def eval_benign_curve(
 
     carry_mod.assert_saturated_inner_lr(carry)
 
-    digest = eval_tokens_digest(np.asarray(eval_tokens)[:-1])
+    digest = benign_eval_digest(eval_tokens)
     if digest != condition.eval_tokens_sha256:
         raise ValueError(
             "benign eval tokens do not match `condition.eval_tokens_sha256`. "

@@ -322,10 +322,18 @@ def test_cli_gate_eval_against_a_checkpoint_needs_the_spike_arms(tmp_path):
 
     tokens = tmp_path / "t.npy"
     np.save(tokens, np.arange(10, dtype=np.int32))
-    with pytest.raises(SystemExit, match="--arms-file"):
-        main(["--objective", "degrade", "--strategy", "select", "--gate-eval",
-              "--checkpoint", str(tmp_path), "--corpus-file", str(tokens),
-              "--eval-file", str(tokens), "--out", str(tmp_path)])
+    probe = tmp_path / "p.npy"
+    np.save(probe, np.arange(10, dtype=np.int32))
+    base = ["--objective", "degrade", "--strategy", "select", "--gate-eval",
+            "--checkpoint", str(tmp_path), "--corpus-file", str(tokens),
+            "--eval-file", str(tokens), "--out", str(tmp_path)]
+    with pytest.raises(SystemExit, match="--probe-file"):
+        main(base)
+    with pytest.raises(SystemExit, match="--uncrafted-arms"):
+        main(base + ["--probe-file", str(probe)])
+    with pytest.raises(SystemExit, match="exclusive"):
+        main(base + ["--probe-file", str(probe), "--uncrafted-arms",
+                     "--arms-file", str(tmp_path / "arms.pkl")])
 
 
 def test_cli_sequence_eval_against_a_checkpoint_needs_the_spike_arms(tmp_path):
@@ -339,3 +347,28 @@ def test_cli_sequence_eval_against_a_checkpoint_needs_the_spike_arms(tmp_path):
         main(["--objective", "degrade", "--strategy", "select", "--sequence-eval",
               "--checkpoint", str(tmp_path), "--corpus-file", str(tokens),
               "--eval-file", str(tokens), "--out", str(tmp_path)])
+
+
+# --------------------------------------------------- benign-eval digest -----
+
+
+def test_benign_eval_digest_is_what_eval_benign_curve_checks():
+    """The CLI used to hash the full eval array while `eval_benign_curve` hashed
+    all but the last token, so every benign eval on the box would have refused
+    to run. One helper now owns the convention."""
+    from trustgate.eval.harness import benign_eval_digest, eval_tokens_digest
+
+    tokens = np.arange(100, 165, dtype=np.int32)
+    assert benign_eval_digest(tokens) == eval_tokens_digest(tokens[:-1])
+    assert benign_eval_digest(tokens) != eval_tokens_digest(tokens)
+
+
+def test_the_cli_builds_every_eval_digest_through_the_helper():
+    from pathlib import Path
+
+    import trustgate.eval.cli as cli
+
+    source = Path(cli.__file__).read_text(encoding="utf-8")
+    assert "eval_tokens_digest(" not in source, (
+        "build RunCondition.eval_tokens_sha256 with harness.benign_eval_digest"
+    )

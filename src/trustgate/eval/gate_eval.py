@@ -44,6 +44,12 @@ from trustgate.eval.overhead import OverheadResult, measure_overhead
 #: observes. Finite, because `anchor_consistency_gate` divides by it.
 OBSERVE_ONLY_THRESHOLD = 1e30
 
+#: `GateEvalResult.arms_source` for arms not produced by the ordering search.
+UNCRAFTED_ARMS = (
+    "UNCRAFTED (random orderings, no search) -- the corruption columns do not "
+    "measure an attack; overhead and clean_regression are unaffected"
+)
+
 #: Floor for a calibrated threshold. A clean stream whose updates never move the
 #: probe logits yields a 0 quantile, which `anchor_consistency_gate` refuses.
 MIN_THRESHOLD = 1e-12
@@ -223,6 +229,7 @@ class GateEvalResult:
     ungated: ArmLosses
     thresholds: list[ThresholdResult] = field(default_factory=list)
     overhead: OverheadResult | None = None
+    arms_source: str = ""
 
 
 def _accept_rate(metrics: list[dict]) -> float:
@@ -301,6 +308,7 @@ def run_gate_eval(
     checkpoint: str,
     overhead_fn: Callable[[AnchorGateSpec], OverheadResult] | None = None,
     log: Callable[[str], None] = print,
+    arms_source: str = "",
 ) -> GateEvalResult:
     """Calibrate, run the ungated arms, then each threshold, then overhead."""
     log(f"[gate] calibrating {divergence} on a clean stream")
@@ -319,6 +327,7 @@ def run_gate_eval(
         seeds=tuple(seeds),
         calibration=cal,
         ungated=ungated,
+        arms_source=arms_source,
     )
 
     for q, t in zip(cal.quantiles, cal.thresholds):

@@ -255,10 +255,17 @@ time $TG --objective degrade --strategy select \
   --out $EXP_DIR/c2-timing
 ```
 
-Two seeds, not one: `cohens_d` needs two per group, and a one-seed run would crash in
-`summarize` after the timing it exists to take. The wall-clock includes checkpoint load,
-compile and the fluency scoring, so it is an upper bound. Take the time after the
-`[run] searching` line, divide it by 2 seeds, then multiply by 5 seeds × proposals. **Choose `--max-iters` from that number**, not from `run_deep.py`'s
+Read the `[run] adapt-and-eval #k: … s` lines. The first includes compilation; the
+second and later ones are the per-proposal cost. A seed costs `max_iters + 1` of those
+(the search scores the sampled ordering first), plus a GPT-2 fluency scoring per
+proposal, plus 2 more for the spike itself. **Choose `--max-iters` so that
+5 × (max_iters + 3) × per-eval time fits the time left.**
+
+**This run can end in `NULL RESULT (not an error)`, and here that means nothing.** With
+one proposal per seed, a rejected proposal is the likeliest outcome. C2 is a timing run:
+its output is not the 001 result and must not be recorded as one. It uses two seeds so
+that if the proposals are accepted it still finishes cleanly (`cohens_d` needs two per
+group). **Choose `--max-iters` from that number**, not from `run_deep.py`'s
 40, which was picked on CPU against a tiny model and does not transfer. Its `--out` is
 deliberately not the C3 directory, and its report is not a result.
 
@@ -303,6 +310,10 @@ to the same quantity `corruption_metric` consumes, and that is only true on the 
 streams. The window count comes from those streams (8 at 8192 tokens), not from
 `--windows`.
 
+**Cost:** `1 + seeds × 4 arms × (windows / eval_every)` benign evaluations, each about
+half an adapt-and-eval. At 8 windows and 5 seeds that is 161. It is non-gating, so if
+time is short, run it **after** C5 or with `--eval-every 2`, which halves the cost.
+
 ### C5. Phase 2 gate measurement
 
 ```bash
@@ -328,6 +339,12 @@ one compile per threshold. Budget it from the C2 timing. **Report the overhead n
 just the pass/fail bool**: a marginal pass is inside the noise of any wall-clock
 measurement. The probe set is fixed, not rotating, and `gate.md` says so.
 
+**If C3 returned `NULL RESULT`**, it wrote no `arms.pkl`: the search stops at the first
+seed that accepts nothing. Skip C4, since sequence arms on uncrafted streams measure no
+attack. For C5, replace `--arms-file …` with `--uncrafted-arms`. That builds uncrafted
+orderings from `$T/train.npy`, so overhead and `clean_regression` are still real
+measurements, and `gate.md` labels the corruption columns as not an attack.
+
 Bounded drift is **not** measured here and must not be reported as enforced: there is no
 carry slot for the accumulator (ADR-003 correction, ADR-P3-1).
 
@@ -343,6 +360,12 @@ python scripts/collect_results.py     # scrubs secrets
 ```
 
 Copy **only** `results/session-*`. The raw `~/ttt-runs` logs contain the W&B key.
+
+Also copy `experiments/001-attack-spike/results/`. It holds `report.md` (the verdict),
+`arms.pkl`, and `sequence/` and `gate/`. These CLI runs set `training.log_wandb=false`
+and write no key, so they need no scrubbing. Copy `$T/tokens-manifest.json` with them:
+it records which tokens were measured. Both copies must happen **before the instance is
+deleted**.
 
 **Delete the instance.** Stopping is not enough — a stopped instance still bills for its
 disk.

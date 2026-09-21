@@ -406,6 +406,7 @@ def render_gate_markdown(result) -> str:
         f"- checkpoint: `{result.checkpoint}`",
         f"- divergence: `{result.divergence}` against theta_0",
         f"- seeds: {', '.join(str(s) for s in result.seeds)}",
+        f"- arms: {result.arms_source or 'unrecorded'}",
         "",
         "## Overhead (ADR-F1 s5.1 budget: ~10% of the per-window update cost)",
         "",

@@ -29,6 +29,12 @@ START_AT="${START_AT:-smoke}"
 
 die() { printf '\nFATAL: %s\n' "$*" >&2; exit 1; }
 
+# The bootstrap installs uv (and possibly the Cloud SDK) with an `export PATH`
+# that dies with its own process, so the shell running this may not see them.
+# Every phase below shells out to `uv run`; find it here, not in phase one.
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/google-cloud-sdk/bin:$PATH"
+command -v uv >/dev/null 2>&1 || die "uv not on PATH. The bootstrap installs it to ~/.local/bin; re-run the bootstrap."
+
 [[ -f "$BOOT/session.env" ]] || die "$BOOT/session.env not found. Run scripts/bootstrap_gpu_box.sh first (with the same EXP_DIR)."
 # shellcheck disable=SC1091
 source "$BOOT/session.env"

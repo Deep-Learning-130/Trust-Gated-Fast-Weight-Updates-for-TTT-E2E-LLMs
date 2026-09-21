@@ -247,6 +247,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="arms.pkl written by the checkpoint spike run: the crafted streams, by seed.",
     )
     parser.add_argument(
+        "--uncrafted-arms",
+        action="store_true",
+        help=(
+            "Fallback for --gate-eval when the spike returned NULL RESULT and "
+            "wrote no arms.pkl: build uncrafted (random-order) arms from the "
+            "real corpus. Overhead and clean_regression stay meaningful; the "
+            "corruption columns do not measure an attack, and gate.md says so."
+        ),
+    )
+    parser.add_argument(
         "--probe-file",
         type=Path,
         default=None,
@@ -396,7 +406,7 @@ def _random_init_run(args) -> int:
     from trustgate.eval.fluency import load_default_scorer
     from trustgate.eval.harness import (
         RunCondition,
-        eval_tokens_digest,
+        benign_eval_digest,
         make_adapt_and_eval,
         run_attack_spike,
     )
@@ -450,7 +460,7 @@ def _random_init_run(args) -> int:
         seq_length=args.seq_length,
         checkpoint=f"random-init-{args.size} (NO CHECKPOINT)",
         benign_eval_split="synthetic",
-        eval_tokens_sha256=eval_tokens_digest(eval_tokens),
+        eval_tokens_sha256=benign_eval_digest(eval_tokens),
     )
 
     out = Path(args.out)
@@ -520,7 +530,7 @@ def _sequence_run(args) -> int:
     from trustgate.eval.harness import (
         RunCondition,
         eval_benign,
-        eval_tokens_digest,
+        benign_eval_digest,
         model_bos_token_id,
     )
     from trustgate.eval.model_build import dummy_tokens
@@ -574,7 +584,7 @@ def _sequence_run(args) -> int:
         seq_length=args.seq_length,
         checkpoint=label,
         benign_eval_split=eval_split,
-        eval_tokens_sha256=eval_tokens_digest(eval_tokens),
+        eval_tokens_sha256=benign_eval_digest(eval_tokens),
     )
 
     result = run_sequence_eval(
@@ -618,7 +628,7 @@ def _gate_run(args) -> int:
     from trustgate.eval import gate_eval, vendor_bind
     from trustgate.eval.harness import (
         RunCondition,
-        eval_tokens_digest,
+        benign_eval_digest,
         make_adapt_and_eval,
         model_bos_token_id,
         run_stream,
@@ -631,23 +641,23 @@ def _gate_run(args) -> int:
         raise SystemExit(f"--divergence must be one of {', '.join(DIVERGENCES)}")
 
     if args.checkpoint:
-        missing = [
-            flag
-            for flag, value in (
-                ("--arms-file", args.arms_file),
-                ("--probe-file", args.probe_file),
-            )
-            if value is None
-        ]
-        if missing:
+        if args.probe_file is None:
             raise SystemExit(
-                f"--gate-eval against a checkpoint needs {', '.join(missing)}: "
-                f"the arms are the spike's crafted streams (arms.pkl in its "
-                f"--out), and the probe window must be held out from the eval."
+                "--gate-eval against a checkpoint needs --probe-file: the probe "
+                "window must be held out from the eval (scripts/dump_tokens.py)."
+            )
+        if args.arms_file is not None and args.uncrafted_arms:
+            raise SystemExit("--arms-file and --uncrafted-arms are exclusive; pick one.")
+        if args.arms_file is None and not args.uncrafted_arms:
+            raise SystemExit(
+                "--gate-eval against a checkpoint needs --arms-file (the spike's "
+                "arms.pkl). If the spike returned NULL RESULT and wrote none, "
+                "pass --uncrafted-arms to measure overhead and clean_regression "
+                "on uncrafted orderings instead; the report labels it."
             )
         if Path(args.probe_file).resolve() == Path(args.eval_file).resolve():
             raise SystemExit("--probe-file and --eval-file are the same file")
-        arms = _load_arms(args)
+        arms = None if args.uncrafted_arms else _load_arms(args)
         eval_tokens = _load_tokens(Path(args.eval_file), "--eval-file")
         probe_tokens = _load_tokens(Path(args.probe_file), "--probe-file")
         corpus_tokens = _load_tokens(Path(args.corpus_file), "--corpus-file")
@@ -661,14 +671,19 @@ def _gate_run(args) -> int:
     bos = model_bos_token_id(binding)
 
     if arms is None:
-        corpus = TokenCorpus(corpus_tokens, name="synthetic")
+        corpus = TokenCorpus(
+            corpus_tokens, name=args.corpus_split if args.checkpoint else "synthetic"
+        )
         pairs = generate_seed_pairs(
             corpus, args.stream_tokens, list(args.seeds), craft_fn=None,
-            mini_batch_size=mini_batch,
+            span_tokens=args.span_tokens, mini_batch_size=mini_batch,
         )
         arms = dict(zip(args.seeds, pairs))
+        arms_source = gate_eval.UNCRAFTED_ARMS
+    else:
+        arms_source = f"crafted by the 001 search ({args.arms_file})"
 
-    eval_digest = eval_tokens_digest(eval_tokens)
+    eval_digest = benign_eval_digest(eval_tokens)
     eval_split = args.eval_split if args.checkpoint else "synthetic"
 
     def condition_for(stream, seed):
@@ -718,6 +733,7 @@ def _gate_run(args) -> int:
         divergence=args.divergence,
         checkpoint=label,
         overhead_fn=overhead_fn,
+        arms_source=arms_source,
     )
 
     out = Path(args.out)
@@ -841,6 +857,30 @@ def _build_victim(args, *, tag: str):
     return cfg, model, binding, mini_batch, label
 
 
+def _timed(adapt_and_eval, tag: str):
+    """Print the wall-clock of every adapt-and-eval as it happens.
+
+    This is the number runbook C2 exists to measure: one ordering-search
+    proposal is one adapt-and-eval, and `--max-iters` multiplies it. The first
+    call includes compilation and says so; the rest are the per-proposal cost.
+    `adapt_and_eval` returns a Python float, so the device is already done.
+    """
+    import time
+
+    count = 0
+
+    def timed(stream, condition):
+        nonlocal count
+        count += 1
+        start = time.perf_counter()
+        value = adapt_and_eval(stream, condition)
+        note = "  (includes compile)" if count == 1 else ""
+        print(f"{tag} adapt-and-eval #{count}: {time.perf_counter() - start:.1f} s{note}", flush=True)
+        return value
+
+    return timed
+
+
 def _checkpoint_run(args) -> int:
     """The real run: trained weights, a searching attacker, a real verdict.
 
@@ -861,7 +901,7 @@ def _checkpoint_run(args) -> int:
     from trustgate.eval.fluency import load_default_scorer
     from trustgate.eval.harness import (
         RunCondition,
-        eval_tokens_digest,
+        benign_eval_digest,
         make_adapt_and_eval,
         run_attack_spike,
     )
@@ -879,8 +919,8 @@ def _checkpoint_run(args) -> int:
     cfg, model, binding, mini_batch, label = _build_victim(args, tag="run")
 
     corpus = TokenCorpus(corpus_tokens, name=args.corpus_split)
-    adapt_and_eval = make_adapt_and_eval(binding, eval_tokens, model=model)
-    eval_digest = eval_tokens_digest(eval_tokens)
+    adapt_and_eval = _timed(make_adapt_and_eval(binding, eval_tokens, model=model), "[run]")
+    eval_digest = benign_eval_digest(eval_tokens)
 
     # A real run must not silently skip the realism bar: a corruption that only
     # appears with a non-fluent stream does not pass, and an absent scorer

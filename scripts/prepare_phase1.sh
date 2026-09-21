@@ -28,6 +28,12 @@ EXP_DIR="${EXP_DIR:-$HOME/ttt-runs}"
 die() { printf '\nFATAL: %s\n' "$*" >&2; exit 1; }
 say() { printf '\n== %s\n' "$*"; }
 
+# Same reason as run_gpu_session.sh: the bootstrap's PATH export for uv and the
+# Cloud SDK does not survive into this shell.
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/google-cloud-sdk/bin:$PATH"
+command -v uv >/dev/null 2>&1 || die "uv not on PATH; the bootstrap installs it to ~/.local/bin"
+command -v gsutil >/dev/null 2>&1 || die "gsutil not on PATH; dump_tokens.py needs it to fetch /train chunk 0"
+
 [[ -f "$EXP_DIR/bootstrap/session.env" ]] || die "$EXP_DIR/bootstrap/session.env missing: run bootstrap_gpu_box.sh first (same EXP_DIR)."
 # shellcheck disable=SC1091
 source "$EXP_DIR/bootstrap/session.env"
