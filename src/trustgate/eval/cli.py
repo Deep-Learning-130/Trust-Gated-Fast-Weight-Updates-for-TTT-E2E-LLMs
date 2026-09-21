@@ -241,6 +241,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help=(
+            "Checkpoint runs record every finished evaluation in <out>/ledger.jsonl "
+            "and a rerun with the same --out reuses them. This ignores the record "
+            "(and keeps appending to it). Use it for C2, whose point is the timing."
+        ),
+    )
+    parser.add_argument(
         "--arms-file",
         type=Path,
         default=None,
@@ -394,6 +403,29 @@ def _banner_report(report_path: Path, banner: str) -> None:
     """Prepend a banner so a number lifted out of the file carries its caveat."""
     existing = report_path.read_text(encoding="utf-8")
     report_path.write_text(f"> **{banner}**\n\n{existing}", encoding="utf-8")
+
+
+def _open_ledger(args, out: Path):
+    """The crash-safe evaluation record, for checkpoint runs only.
+
+    Never for --random-init: a replayed smoke test would pass on a rerun
+    without touching the vendor forward it exists to exercise.
+    """
+    if not args.checkpoint:
+        return None
+    from trustgate.eval.ledger import LEDGER_NAME, Ledger
+
+    if args.no_resume:
+        print(f"[ledger] --no-resume: recording to {out / LEDGER_NAME}, reusing nothing")
+        return Ledger(out / LEDGER_NAME, reuse=False)
+    return Ledger(out / LEDGER_NAME)
+
+
+def _save_pickle(obj, path: Path) -> None:
+    from trustgate.eval.ledger import atomic_write_bytes
+
+    atomic_write_bytes(path, pickle.dumps(obj))
+    print(f"saved {path}", flush=True)
 
 
 def _random_init_run(args) -> int:
@@ -594,6 +626,10 @@ def _sequence_run(args) -> int:
         eval_tokens_sha256=benign_eval_digest(eval_tokens),
     )
 
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    ledger = _open_ledger(args, out)
+
     result = run_sequence_eval(
         condition,
         list(args.seeds),
@@ -605,10 +641,10 @@ def _sequence_run(args) -> int:
         fresh_carry=binding.init_carry,
         evaluate=lambda carry, cond: eval_benign(binding, carry, eval_tokens, cond),
         eval_every=args.eval_every,
+        ledger=ledger,
     )
 
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
+    _save_pickle(result, out / "sequence-result.pkl")
     report_path = write_sequence_report(
         result, out / "sequence.md", onset_delta=args.onset_delta
     )
@@ -720,6 +756,18 @@ def _gate_run(args) -> int:
 
     gate_inputs = gate_eval.make_gate_inputs(binding, probe_tokens, bos_token_id=bos)
 
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    ledger = _open_ledger(args, out)
+    from trustgate.eval.ledger import condition_key, tokens_digest
+
+    # What the stream and condition do not already pin: the probe window, and
+    # (for calibration) the clean slice and the divergence.
+    ledger_tag = f"probe={tokens_digest(probe_tokens)}"
+    calibration_key = "gate/calibration:" + "|".join(
+        (tokens_digest(calib_tokens), condition_key(calib_condition), args.divergence, ledger_tag)
+    )
+
     overhead_fn = None
     if args.overhead_repeats > 0:
         chunk = vendor_bind.sequence_chunks(binding, eval_tokens, bos_token_id=bos)[0]
@@ -741,12 +789,12 @@ def _gate_run(args) -> int:
         checkpoint=label,
         overhead_fn=overhead_fn,
         arms_source=arms_source,
+        ledger=ledger,
+        ledger_tag=ledger_tag,
+        calibration_key=calibration_key,
     )
 
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
-    with (out / "gate-result.pkl").open("wb") as fh:
-        pickle.dump(result, fh)
+    _save_pickle(result, out / "gate-result.pkl")
     report_path = write_gate_report(result, out / "gate.md")
     if not args.checkpoint:
         _banner_report(report_path, NOT_A_RESULT)
@@ -925,8 +973,18 @@ def _checkpoint_run(args) -> int:
 
     cfg, model, binding, mini_batch, label = _build_victim(args, tag="run")
 
+    from trustgate.eval.ledger import memoize_adapt_and_eval
+
+    # Created before any compute, so every finished evaluation lands on disk
+    # as it happens; see `trustgate.eval.ledger`.
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    ledger = _open_ledger(args, out)
+    search_log = out / "search-log.jsonl"
+
     corpus = TokenCorpus(corpus_tokens, name=args.corpus_split)
-    adapt_and_eval = _timed(make_adapt_and_eval(binding, eval_tokens, model=model), "[run]")
+    timed_eval = _timed(make_adapt_and_eval(binding, eval_tokens, model=model), "[run]")
+    adapt_and_eval = memoize_adapt_and_eval(timed_eval, ledger, kind="search")
     eval_digest = benign_eval_digest(eval_tokens)
 
     # A real run must not silently skip the realism bar: a corruption that only
@@ -967,12 +1025,30 @@ def _checkpoint_run(args) -> int:
     searches: dict[int, object] = {}
 
     def record(seed, result):
+        import json
+
         searches[seed] = result
         print(
             f"[run] seed {seed}: {result.n_evaluations} evaluations, "
             f"gain {result.gain:+.6f}, accepted {result.n_accepted}"
-            + (", stopped early" if result.stopped_early else "")
+            + (", stopped early" if result.stopped_early else ""),
+            flush=True,
         )
+        # The search's own accounting is the evidence it searched; a null
+        # without it cannot be read. On disk per seed, as each one ends.
+        entry = {
+            "seed": seed,
+            "n_evaluations": int(result.n_evaluations),
+            "n_accepted": int(result.n_accepted),
+            "gain": float(result.gain),
+            "baseline_score": float(result.baseline_score),
+            "best_score": float(result.best_score),
+            "stopped_early": bool(result.stopped_early),
+            "max_iters": args.max_iters,
+            "checkpoint": label,
+        }
+        with search_log.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
 
     print(
         f"[run] searching: {len(args.seeds)} seeds x up to {args.max_iters} "
@@ -1000,27 +1076,31 @@ def _checkpoint_run(args) -> int:
     except NoOrderingFound as exc:
         # A real null, and the honest report is that the attacker searched and
         # found nothing -- not a crash, and not a rerun at a kinder setting.
-        raise SystemExit(
+        message = (
             f"NULL RESULT (not an error): {exc}\n"
             f"Under SELECT the attacker's only lever is ordering. Record this "
             f"as the outcome; PREREGISTERED.md says publishing a STOP is the "
             f"honest result."
-        ) from exc
+        )
+        null_path = out / "NULL-RESULT.md"
+        null_path.write_text(
+            f"# 001 spike: NULL RESULT\n\n- checkpoint: {label}\n"
+            f"- seeds: {list(args.seeds)}, max_iters: {args.max_iters}\n"
+            f"- per-seed search accounting: `search-log.jsonl`\n\n{message}\n",
+            encoding="utf-8",
+        )
+        print(f"saved {null_path}", flush=True)
+        raise SystemExit(message) from exc
 
     arms = dict(zip(args.seeds, pairs))
     first_poison, _ = arms[args.seeds[0]]
     condition = condition_for(first_poison, args.seeds[0])
 
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
     # Written the moment the search ends, before anything else can crash: the
     # search is the session's dominant cost, and the Phase 2 gate measurement
     # (--gate-eval --arms-file) re-runs these exact streams rather than
     # searching again.
-    arms_path = out / "arms.pkl"
-    with arms_path.open("wb") as fh:
-        pickle.dump(arms, fh)
-    print(f"[run] crafted arms saved to {arms_path}")
+    _save_pickle(arms, out / "arms.pkl")
 
     result = run_attack_spike(
         spec,
@@ -1028,9 +1108,12 @@ def _checkpoint_run(args) -> int:
         list(args.seeds),
         out,
         build_arms=arms.__getitem__,
-        adapt_and_eval=adapt_and_eval,
+        # Its own record kind: the spike re-measures the crafted streams rather
+        # than reusing the search's score for the ordering it picked.
+        adapt_and_eval=memoize_adapt_and_eval(timed_eval, ledger, kind="spike"),
         fluency_scorer=fluency_scorer,
     )
+    _save_pickle(result, out / "spike-result.pkl")
 
     report_path = write_report(
         result,

@@ -90,6 +90,7 @@ print(f"   overhead (125m, 3 repeats, indicative only): {r.overhead.overhead_fra
 PY
 
 say "6. writing $EXP_DIR/phase1.env"
+mkdir -p "$repo_root/experiments/001-attack-spike/results/logs"
 cat > "$EXP_DIR/phase1.env" <<EOF
 # Source this before C2-C5: source "$EXP_DIR/phase1.env"
 # Every path here is absolute, so C2-C5 work from any directory.
@@ -98,7 +99,8 @@ export R="$repo_root/experiments/001-attack-spike/results"
 export T="$T"
 export CKPT_DEST="$CKPT_DEST"
 export CKPT_MANIFEST="$CKPT_MANIFEST"
-export TG="env PYTHONPATH=$repo_root/src XLA_PYTHON_CLIENT_PREALLOCATE=false $VPY -m trustgate.eval.cli"
+# Unbuffered, so the timing lines reach the tee'd log as they happen.
+export TG="env PYTHONPATH=$repo_root/src PYTHONUNBUFFERED=1 XLA_PYTHON_CLIENT_PREALLOCATE=false $VPY -m trustgate.eval.cli"
 EOF
 cat "$EXP_DIR/phase1.env"
 

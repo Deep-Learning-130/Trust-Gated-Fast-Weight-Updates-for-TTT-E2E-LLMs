@@ -157,6 +157,8 @@ def calibrate(
     quantiles: list[float],
     *,
     divergence: str,
+    ledger=None,
+    ledger_key: str | None = None,
 ) -> Calibration:
     """Observe the gate on a clean stream and read thresholds off its quantiles.
 
@@ -172,14 +174,23 @@ def calibrate(
     if not quantiles or any(not 0.0 < q <= 1.0 for q in quantiles):
         raise ValueError(f"quantiles must lie in (0, 1], got {quantiles}")
 
-    metrics: list[dict] = []
-    run_stream_fn(
-        gate_spec=AnchorGateSpec(OBSERVE_ONLY_THRESHOLD, divergence),
-        gate_inputs=gate_inputs,
-        metrics_out=metrics,
-    )
-    accepted = gate_series(metrics, "gate/accepted")
-    div = gate_series(metrics, "gate/drift_delta")[accepted > 0.5]
+    cached = ledger.get(ledger_key) if ledger is not None and ledger_key else None
+    if cached is not None:
+        accepted = np.asarray(cached["accepted"], dtype=float)
+        drift = np.asarray(cached["drift"], dtype=float)
+    else:
+        metrics: list[dict] = []
+        run_stream_fn(
+            gate_spec=AnchorGateSpec(OBSERVE_ONLY_THRESHOLD, divergence),
+            gate_inputs=gate_inputs,
+            metrics_out=metrics,
+        )
+        accepted = gate_series(metrics, "gate/accepted")
+        drift = gate_series(metrics, "gate/drift_delta")
+        if ledger is not None and ledger_key:
+            ledger.put(ledger_key, "gate/calibration",
+                       {"accepted": [float(a) for a in accepted], "drift": [float(d) for d in drift]})
+    div = drift[accepted > 0.5]
     unscorable = int((accepted <= 0.5).sum())
     if div.size == 0:
         raise ValueError(
@@ -246,23 +257,46 @@ def run_arms(
     *,
     gate_spec=None,
     gate_inputs=None,
+    ledger=None,
+    ledger_tag: str = "",
 ) -> ArmLosses:
     """Adapt-and-eval both arms of every seed, with or without the gate.
 
     `adapt_and_eval_for(gate_spec=, gate_inputs=, metrics_out=)` returns a
     `harness.make_adapt_and_eval`-style callable; a fresh metrics list per arm
     is what lets the acceptance rate be read per arm.
+
+    With a `ledger`, each finished arm is recorded before the next starts and a
+    rerun reuses it. `ledger_tag` must identify everything about the gate that
+    the stream and condition do not: the spec and the probe window.
     """
+    from trustgate.eval.ledger import eval_key
+
     poisoned, control, p_rate, c_rate = [], [], [], []
     for seed in seeds:
         poison, ctrl = build_arms(seed)
         for stream, losses, rates in ((poison, poisoned, p_rate), (ctrl, control, c_rate)):
+            condition = condition_for(stream, seed)
+            key = None
+            cached = None
+            if ledger is not None:
+                key = eval_key("gate/arm", stream, condition, repr(gate_spec), ledger_tag)
+                cached = ledger.get(key)
+            if cached is not None:
+                losses.append(float(cached["loss"]))
+                rates.append(float(cached["accept_rate"]))
+                continue
             metrics: list[dict] = []
             fn = adapt_and_eval_for(
                 gate_spec=gate_spec, gate_inputs=gate_inputs, metrics_out=metrics
             )
-            losses.append(float(fn(stream, condition_for(stream, seed))))
+            losses.append(float(fn(stream, condition)))
             rates.append(_accept_rate(metrics) if gate_spec is not None else 1.0)
+            if ledger is not None:
+                ledger.put(key, "gate/arm", {
+                    "loss": losses[-1], "accept_rate": rates[-1], "seed": seed,
+                    "gate": repr(gate_spec),
+                })
     return ArmLosses(
         poisoned=tuple(poisoned),
         control=tuple(control),
@@ -309,10 +343,19 @@ def run_gate_eval(
     overhead_fn: Callable[[AnchorGateSpec], OverheadResult] | None = None,
     log: Callable[[str], None] = print,
     arms_source: str = "",
+    ledger=None,
+    ledger_tag: str = "",
+    calibration_key: str | None = None,
 ) -> GateEvalResult:
-    """Calibrate, run the ungated arms, then each threshold, then overhead."""
+    """Calibrate, run the ungated arms, then each threshold, then overhead.
+
+    With a `ledger`, calibration and every arm are recorded as they finish, so
+    a crashed run resumes. `ledger_tag` identifies the probe window;
+    `calibration_key` the calibration stream, condition and divergence.
+    """
     log(f"[gate] calibrating {divergence} on a clean stream")
-    cal = calibrate(calibrate_stream_fn, gate_inputs, quantiles, divergence=divergence)
+    cal = calibrate(calibrate_stream_fn, gate_inputs, quantiles, divergence=divergence,
+                    ledger=ledger, ledger_key=calibration_key)
     log(
         f"[gate] calibration: {len(cal.divergences)} scorable steps, "
         f"{cal.unscorable_steps} unscorable; thresholds "
@@ -320,7 +363,8 @@ def run_gate_eval(
     )
 
     log("[gate] ungated arms")
-    ungated = run_arms(seeds, build_arms, adapt_and_eval_for, condition_for)
+    ungated = run_arms(seeds, build_arms, adapt_and_eval_for, condition_for,
+                       ledger=ledger, ledger_tag=ledger_tag)
     result = GateEvalResult(
         divergence=divergence,
         checkpoint=checkpoint,
@@ -340,6 +384,8 @@ def run_gate_eval(
             condition_for,
             gate_spec=spec,
             gate_inputs=gate_inputs,
+            ledger=ledger,
+            ledger_tag=ledger_tag,
         )
         result.thresholds.append(
             ThresholdResult(

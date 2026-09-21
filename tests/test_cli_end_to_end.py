@@ -256,3 +256,177 @@ def test_c2_timing_run_finishes_or_reports_a_null(session, capsys):
     except SystemExit as exc:
         assert "NULL RESULT" in str(exc)
     assert "adapt-and-eval #1:" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------ crash + resume --
+
+
+class _Crash(RuntimeError):
+    """Stands in for an OOM, a preemption or a Ctrl-C part-way through a run."""
+
+
+def _crash_factory_after(monkeypatch, n):
+    """Make every adapt-and-eval built from here on die on the n-th call overall."""
+    from trustgate.eval import harness
+
+    real = harness.make_adapt_and_eval
+    calls = {"n": 0}
+
+    def factory(*a, **k):
+        fn = real(*a, **k)
+
+        def dying(stream, condition):
+            calls["n"] += 1
+            if calls["n"] == n:
+                raise _Crash(f"injected at evaluation {n}")
+            return fn(stream, condition)
+
+        return dying
+
+    monkeypatch.setattr(harness, "make_adapt_and_eval", factory)
+    return lambda: monkeypatch.setattr(harness, "make_adapt_and_eval", real)
+
+
+def _real_evals(out: str) -> int:
+    return out.count("adapt-and-eval #")
+
+
+def test_c3_resumes_from_the_ledger_after_a_crash(session, capsys, monkeypatch):
+    cli, common, _files, results = session
+    argv = common + ["--max-iters", "6", "--early-stop-patience", "0"]
+
+    assert cli.main(argv + ["--out", str(results / "ref")]) == 0
+    total = _real_evals(capsys.readouterr().out)
+    ref = pickle.loads((results / "ref" / "spike-result.pkl").read_bytes())
+    assert (results / "ref" / "search-log.jsonl").read_text().count("\n") == 3
+
+    restore = _crash_factory_after(monkeypatch, 9)
+    with pytest.raises(_Crash):
+        cli.main(argv + ["--out", str(results / "run")])
+    restore()
+    capsys.readouterr()
+    assert (results / "run" / "ledger.jsonl").read_text().count("\n") == 8
+
+    assert cli.main(argv + ["--out", str(results / "run")]) == 0
+    out = capsys.readouterr().out
+    assert "8 finished evaluation(s) on record" in out
+    assert _real_evals(out) == total - 8, "a resumed run recomputed finished work"
+    got = pickle.loads((results / "run" / "spike-result.pkl").read_bytes())
+    assert got.per_seed_poisoned == ref.per_seed_poisoned
+    assert got.per_seed_control == ref.per_seed_control
+    assert (results / "run" / "arms.pkl").read_bytes() == (results / "ref" / "arms.pkl").read_bytes()
+
+
+def test_c2_no_resume_times_every_evaluation_again(session, capsys):
+    cli, common, _files, results = session
+    argv = common + ["--max-iters", "4", "--early-stop-patience", "0", "--out", str(results / "c2")]
+    assert cli.main(argv) == 0
+    first = _real_evals(capsys.readouterr().out)
+    assert cli.main(argv + ["--no-resume"]) == 0
+    assert _real_evals(capsys.readouterr().out) == first
+
+
+def test_c5_resumes_from_the_ledger_after_a_crash(session, monkeypatch):
+    cli, common, files, results = session
+    assert cli.main(common + ["--max-iters", "6", "--early-stop-patience", "0",
+                              "--out", str(results)]) == 0
+    gate = common + ["--gate-eval", "--arms-file", str(results / "arms.pkl"),
+                     "--probe-file", str(files["probe"]), "--overhead-repeats", "0"]
+
+    assert cli.main(gate + ["--out", str(results / "gref")]) == 0
+    ref = pickle.loads((results / "gref" / "gate-result.pkl").read_bytes())
+
+    # 6 ungated arm runs, then die inside the first gated threshold.
+    restore = _crash_factory_after(monkeypatch, 8)
+    with pytest.raises(_Crash):
+        cli.main(gate + ["--out", str(results / "g")])
+    restore()
+    lines = (results / "g" / "ledger.jsonl").read_text().splitlines()
+    assert sum('"gate/calibration"' in l for l in lines) == 1
+    assert sum('"gate/arm"' in l for l in lines) == 7
+
+    assert cli.main(gate + ["--out", str(results / "g")]) == 0
+    got = pickle.loads((results / "g" / "gate-result.pkl").read_bytes())
+    assert got.calibration == ref.calibration
+    assert got.ungated == ref.ungated
+    assert got.thresholds == ref.thresholds
+
+
+def test_c4_resumes_from_the_ledger_after_a_crash(session, monkeypatch):
+    cli, common, _files, results = session
+    from trustgate.eval import harness
+
+    assert cli.main(common + ["--max-iters", "6", "--early-stop-patience", "0",
+                              "--out", str(results)]) == 0
+    seq = common + ["--sequence-eval", "--arms-file", str(results / "arms.pkl")]
+    assert cli.main(seq + ["--out", str(results / "sref")]) == 0
+    ref = pickle.loads((results / "sref" / "sequence-result.pkl").read_bytes())
+
+    real = harness.eval_benign
+    calls = {"n": 0}
+
+    def dying(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 20:  # floor + seed 0 (4 arms x 4 windows), then into seed 1
+            raise _Crash("injected")
+        return real(*a, **k)
+
+    monkeypatch.setattr(harness, "eval_benign", dying)
+    with pytest.raises(_Crash):
+        cli.main(seq + ["--out", str(results / "s")])
+    monkeypatch.setattr(harness, "eval_benign", real)
+    assert (results / "s" / "ledger.jsonl").read_text().count('"sequence/arm"') == 4
+
+    assert cli.main(seq + ["--out", str(results / "s")]) == 0
+    got = pickle.loads((results / "s" / "sequence-result.pkl").read_bytes())
+    assert got.floor_loss == ref.floor_loss
+    assert got.per_seed == ref.per_seed
+
+
+def test_a_null_spike_leaves_its_record_on_disk(session, monkeypatch):
+    cli, common, _files, results = session
+    from trustgate.eval import attacker
+
+    def make_craft_fn(*, on_result=None, **_k):
+        def craft_fn(seed):
+            result = types.SimpleNamespace(
+                n_evaluations=4, n_accepted=0, gain=0.0, baseline_score=1.0,
+                best_score=1.0, stopped_early=False,
+            )
+            on_result(seed, result)
+            raise attacker.NoOrderingFound(f"seed {seed} accepted nothing")
+        return craft_fn
+
+    monkeypatch.setattr(attacker, "make_craft_fn", make_craft_fn)
+    with pytest.raises(SystemExit, match="NULL RESULT"):
+        cli.main(common + ["--out", str(results)])
+    assert "NULL RESULT" in (results / "NULL-RESULT.md").read_text(encoding="utf-8")
+    assert '"n_accepted": 0' in (results / "search-log.jsonl").read_text()
+
+
+def test_random_init_runs_keep_no_ledger(session):
+    """A replayed smoke test would pass without touching the vendor forward."""
+    cli, _common, _files, results = session
+    out = results / "ri"
+    args = ["--objective", "degrade", "--strategy", "select", "--random-init",
+            "--seq-length", str(SEQ), "--stream-tokens", str(SEQ),
+            "--corpus-tokens", "4096", "--seeds", "0", "1", "--gate-eval",
+            "--overhead-repeats", "0", "--out", str(out)]
+    assert cli.main(args) == 0
+    assert not (out / "ledger.jsonl").exists()
+
+
+def test_ledger_survives_a_torn_last_line(tmp_path):
+    from trustgate.eval.ledger import Ledger
+
+    path = tmp_path / "ledger.jsonl"
+    led = Ledger(path)
+    led.put("a", "k", {"loss": 1.5})
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write('{"key": "b", "kind": "k", "val')  # died mid-write
+    led = Ledger(path)
+    assert led.get("a") == {"loss": 1.5} and led.get("b") is None
+    led.put("c", "k", {"loss": float("nan")})
+    led = Ledger(path)
+    assert led.get("a") == {"loss": 1.5}
+    assert np.isnan(led.get("c")["loss"])

@@ -174,6 +174,7 @@ def run_sequence_eval(
     fresh_carry: Callable[[], CarryState],
     evaluate: Callable[[CarryState, RunCondition], float],
     eval_every: int = 1,
+    ledger=None,
 ) -> SequenceResult:
     """Run every arm across every seed and return the position curves.
 
@@ -196,6 +197,8 @@ def run_sequence_eval(
             not mutate the carry it is handed.
         eval_every: measure after every Nth window. The cost knob: four arms
             times `n_windows` evaluations per seed is not free.
+        ledger: optional `trustgate.eval.ledger.Ledger`. Each finished arm is
+            recorded before the next starts, and a rerun reuses it.
 
     Returns:
         A `SequenceResult`.
@@ -211,7 +214,31 @@ def run_sequence_eval(
     # run is finding it out too late.
     carry_mod.assert_saturated_inner_lr(fresh_carry())
 
-    floor_loss = float(evaluate(fresh_carry(), condition))
+    from trustgate.eval.ledger import condition_key, eval_key
+
+    floor_key = "sequence/floor:" + condition_key(condition)
+    cached_floor = ledger.get(floor_key) if ledger is not None else None
+    if cached_floor is not None:
+        floor_loss = float(cached_floor["loss"])
+    else:
+        floor_loss = float(evaluate(fresh_carry(), condition))
+        if ledger is not None:
+            ledger.put(floor_key, "sequence/floor", {"loss": floor_loss})
+
+    def arm(run, windows, stream, arm_condition, name):
+        key = cached = None
+        if ledger is not None:
+            key = eval_key("sequence/arm", stream, arm_condition, name,
+                           f"eval_every={eval_every}", f"windows={len(windows)}")
+            cached = ledger.get(key)
+        if cached is not None:
+            return ArmTrace(name=name, per_window_loss=tuple(float(x) for x in cached["losses"]),
+                            eval_every=eval_every)
+        trace = run(windows, step_fn, fresh_carry, evaluate, arm_condition, eval_every, name)
+        if ledger is not None:
+            ledger.put(key, "sequence/arm",
+                       {"losses": list(trace.per_window_loss), "arm": name, "seed": arm_condition.seed})
+        return trace
 
     per_seed: dict[int, dict[str, ArmTrace]] = {}
     n_windows: int | None = None
@@ -265,19 +292,14 @@ def run_sequence_eval(
                 f"seeds would not line up"
             )
 
-        args = (step_fn, fresh_carry, evaluate)
         per_seed[seed] = {
-            POISON: _run_threaded(
-                poison_windows, *args, poison_condition, eval_every, POISON
+            POISON: arm(_run_threaded, poison_windows, poison, poison_condition, POISON),
+            CONTROL: arm(_run_threaded, control_windows, control, control_condition, CONTROL),
+            POISON_NO_CARRY: arm(
+                _run_no_carry, poison_windows, poison, poison_condition, POISON_NO_CARRY
             ),
-            CONTROL: _run_threaded(
-                control_windows, *args, control_condition, eval_every, CONTROL
-            ),
-            POISON_NO_CARRY: _run_no_carry(
-                poison_windows, *args, poison_condition, eval_every, POISON_NO_CARRY
-            ),
-            CONTROL_NO_CARRY: _run_no_carry(
-                control_windows, *args, control_condition, eval_every, CONTROL_NO_CARRY
+            CONTROL_NO_CARRY: arm(
+                _run_no_carry, control_windows, control, control_condition, CONTROL_NO_CARRY
             ),
         }
 

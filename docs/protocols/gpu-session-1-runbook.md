@@ -244,6 +244,17 @@ The inner step is compiled with `eqx.filter_jit`. If a trace fails,
 `TRUSTGATE_NO_JIT=1 $TG ...` runs it eagerly, for diagnosis only; never time anything
 under it.
 
+**Everything is saved as it is produced, and every run resumes.** Each checkpoint run
+appends every finished evaluation to `<out>/ledger.jsonl`. Each record is fsynced and
+keyed by the stream's tokens, the run condition (which carries the checkpoint fingerprint
+and the eval digest) and the gate. **If C3, C4 or C5 dies (OOM, a dropped SSH session,
+Ctrl-C), rerun the identical command with the same `--out`.** It replays what finished
+and continues from the crash. For C3 that includes a search interrupted mid-seed, because
+the search is seeded. If any input changes, the recorded values simply don't match, so a
+wrong number is never reused. C3 also writes `search-log.jsonl` (one line per finished
+seed's search) and, on a null, `NULL-RESULT.md`. Every command below tees its output to
+`$R/logs/`.
+
 ### C2. Measure one adapt-and-eval before budgeting the search
 
 ```bash
@@ -251,8 +262,8 @@ time $TG --objective degrade --strategy select \
   --checkpoint $CKPT_DEST --checkpoint-manifest $CKPT_MANIFEST \
   --corpus-file $T/train.npy --eval-file $T/val.npy \
   --size 1b --seq-length 8192 --stream-tokens 8192 \
-  --seeds 0 1 --max-iters 1 --early-stop-patience 0 \
-  --out $EXP_DIR/c2-timing
+  --seeds 0 1 --max-iters 1 --early-stop-patience 0 --no-resume \
+  --out $EXP_DIR/c2-timing 2>&1 | tee -a $R/logs/c2-timing.log
 ```
 
 Read the `[run] adapt-and-eval #k: … s` lines. The first includes compilation; the
@@ -278,7 +289,7 @@ $TG --objective degrade --strategy select \
   --corpus-split train --eval-split val \
   --size 1b --seq-length 8192 --stream-tokens 8192 \
   --seeds 0 1 2 3 4 --max-iters <measured> \
-  --out $R
+  --out $R 2>&1 | tee -a $R/logs/c3-spike.log
 ```
 
 Five seeds per condition, SELECT headline, DEGRADE objective, `meta` mode only (enforced in
@@ -292,6 +303,8 @@ null, not retried at a kinder setting.
 
 C3 writes `arms.pkl` (the crafted streams, by seed) into its `--out` **the moment the
 search ends**, before the spike itself runs. C4 and C5 re-run exactly those streams.
+**Copy `$R` off the box now** (Part D's commands), before starting C4. It takes seconds,
+and the search is the one result nothing else can recreate.
 
 ### C4. Sequence-position arms — secondary, non-gating
 
@@ -301,7 +314,7 @@ $TG --objective degrade --strategy select --sequence-eval \
   --corpus-file $T/train.npy --eval-file $T/val.npy \
   --arms-file $R/arms.pkl \
   --size 1b --seq-length 8192 --seeds 0 1 2 3 4 \
-  --out $R/sequence
+  --out $R/sequence 2>&1 | tee -a $R/logs/c4-sequence.log
 ```
 
 This renders no verdict line at all, by design, so the two artifacts cannot be confused.
@@ -323,7 +336,7 @@ $TG --objective degrade --strategy select --gate-eval \
   --arms-file $R/arms.pkl \
   --size 1b --seq-length 8192 --seeds 0 1 2 3 4 \
   --gate-quantiles 0.9 0.99 \
-  --out $R/gate
+  --out $R/gate 2>&1 | tee -a $R/logs/c5-gate.log
 ```
 
 This calibrates the anchor gate on a clean, uncrafted corpus slice. It reads thresholds
@@ -348,8 +361,8 @@ measurements, and `gate.md` labels the corruption columns as not an attack.
 Bounded drift is **not** measured here and must not be reported as enforced: there is no
 carry slot for the accumulator (ADR-003 correction, ADR-P3-1).
 
-Write every artifact to disk as it is produced. A crash at hour two must not restart hour
-one.
+Every artifact is written to disk as it is produced (the ledger, above). A crash at hour
+two does not restart hour one: rerun the same command.
 
 ---
 
@@ -361,11 +374,32 @@ python scripts/collect_results.py     # scrubs secrets
 
 Copy **only** `results/session-*`. The raw `~/ttt-runs` logs contain the W&B key.
 
-Also copy `experiments/001-attack-spike/results/`. It holds `report.md` (the verdict),
-`arms.pkl`, and `sequence/` and `gate/`. These CLI runs set `training.log_wandb=false`
-and write no key, so they need no scrubbing. Copy `$T/tokens-manifest.json` with them:
-it records which tokens were measured. Both copies must happen **before the instance is
-deleted**.
+Also copy `experiments/001-attack-spike/results/`. It holds:
+- `report.md` (the verdict) and `spike-result.pkl`;
+- `arms.pkl`, `search-log.jsonl` and `ledger.jsonl`;
+- `logs/`;
+- `sequence/` and `gate/`, each with its `.md`, `-result.pkl` and `ledger.jsonl`.
+
+These CLI runs set `training.log_wandb=false` and write no key, so they need no scrubbing.
+Copy `$T/tokens-manifest.json` with them: it records which tokens were measured. On the
+box:
+
+```bash
+cp $T/tokens-manifest.json $R/
+tar czf ~/001-results.tgz -C "$(dirname $R)" results
+```
+
+Then **on the laptop**:
+
+```bash
+gcloud compute scp --zone <zone> <instance>:~/001-results.tgz .
+tar xzf 001-results.tgz -C experiments/001-attack-spike/
+```
+
+Run that after C3, after C5, and once more at the end. Each copy takes seconds, and a
+deleted or broken instance takes everything not yet copied with it. Open `report.md` and
+`gate/gate.md` **on the laptop** before deleting the instance: a copy you have not opened
+is not a copy. Both copies must happen **before the instance is deleted**.
 
 **Delete the instance.** Stopping is not enough — a stopped instance still bills for its
 disk.
