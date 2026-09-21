@@ -1,18 +1,19 @@
 #!/usr/bin/env python
 """Generate the results deck: what has been done, stated plainly.
 
+Written for a reader outside the project: no experiment numbers, file names or
+commit pins on the slides, and every figure is followed by what it means.
 Austere on purpose. Times New Roman, black on white, no accent colour, no cards,
-no banners, greyscale figures. One column. Claims are tables and short
-statements rather than paragraphs -- a supervisor reading a status deck wants
-the numbers and the scope, and prose between them slows that down.
+no banners, greyscale figures. One column, tables and short statements.
 
 `make_review_deck.py` is the other deck and keeps its own visual system; this
 one deliberately does not share it.
 
-Every number is read from a committed result file at build time, never retyped,
-so the deck moves when the results move. That is only worth anything because the
-corpus is pinned (`experiments/002-pilot-tiny-ttt/run_pilot.py`) -- before that,
-the files it reads were not reproducible.
+The pilot figures are read from its result files at build time, so the deck moves
+when those results move; that is only worth anything because the corpus is
+pinned (`experiments/002-pilot-tiny-ttt/run_pilot.py`). Figures from GPU runs and
+from the cost model are held as constants, because their sources are git-ignored
+or live in prose documents.
 
     .venv/Scripts/python scripts/make_results_deck.py
 """
@@ -28,7 +29,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from pptx import Presentation  # noqa: E402
 from pptx.dml.color import RGBColor  # noqa: E402
-from pptx.enum.text import MSO_ANCHOR, PP_ALIGN  # noqa: E402
+from pptx.enum.text import MSO_ANCHOR  # noqa: E402
 from pptx.util import Emu, Inches, Pt  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,9 +48,73 @@ L0 = Inches(1.0)
 CW = Inches(11.333)
 TITLE_TOP = Inches(0.62)
 BODY_TOP = Inches(1.78)
-FOOTER = "Trust-Gated Fast-Weight Updates for TTT-E2E LLMs"
 
-_page = [0]
+#: Bottom margin every body box is clamped to. There is no footer, so this is
+#: whitespace rather than a reservation.
+FOOT_MARGIN = Inches(0.30)
+
+
+# ----------------------------------------------------------- text metrics --
+# The previous layout estimated a bullet at a flat 0.40in regardless of how many
+# lines it actually wrapped to, so any table under a two-line bullet had to be
+# nudged down by hand. Measuring against the real font removes the guess.
+_FONT_FILES = {
+    (False, False): "times.ttf",
+    (True, False): "timesbd.ttf",
+    (False, True): "timesi.ttf",
+    (True, True): "timesbi.ttf",
+}
+_FONT_DIR = Path("C:/Windows/Fonts")
+_SCALE = 4  # measure at 4x nominal size, for sub-point resolution
+_font_cache: dict = {}
+
+
+def _font(size_pt: float, bold: bool, italic: bool):
+    key = (round(size_pt * _SCALE), bold, italic)
+    if key not in _font_cache:
+        from PIL import ImageFont
+
+        _font_cache[key] = ImageFont.truetype(
+            str(_FONT_DIR / _FONT_FILES[(bold, italic)]),
+            int(round(size_pt * _SCALE)),
+        )
+    return _font_cache[key]
+
+
+def _advance(text: str, size_pt: float, bold: bool, italic: bool) -> float:
+    """Width of `text` in points. Falls back to a ratio off Windows."""
+    try:
+        return _font(size_pt, bold, italic).getlength(text) / _SCALE
+    except (OSError, ImportError, KeyError):
+        return len(text) * size_pt * (0.52 if bold else 0.48)
+
+
+def wrapped_lines(runs, width_in: float, size_pt: float) -> int:
+    """Rendered line count for a sequence of (text, bold, italic) runs.
+
+    Greedy word wrap, the same rule PowerPoint applies. Runs are measured with
+    their own face, so a bold lead-in is not costed as regular text.
+    """
+    limit = width_in * 72.0
+    count, used = 1, 0.0
+    for text, bold, italic in runs:
+        for i, word in enumerate(text.split(" ")):
+            if not word and i:
+                continue
+            piece = word if used == 0.0 else " " + word
+            w = _advance(piece, size_pt, bold, italic)
+            if used and used + w > limit:
+                count += 1
+                used = _advance(word, size_pt, bold, italic)
+            else:
+                used += w
+    return count
+
+
+def text_height(n_lines: int, size_pt: float, spacing: float = 1.0,
+                space_after: float = 0.0) -> float:
+    """Inches occupied. 1.2x nominal size is PowerPoint's single-line height."""
+    return (n_lines * size_pt * 1.2 * spacing + space_after) / 72.0
 
 
 # ------------------------------------------------------------- primitives --
@@ -95,48 +160,67 @@ def slide(prs, title):
     tf = _box(s, L0, TITLE_TOP, CW, Inches(0.9))
     _para(tf, True, title, 28, bold=True, space_after=0, line=1.04)
     _rule(s, BODY_TOP - Inches(0.26))
-
-    _page[0] += 1
-    tf = _box(s, L0, H - Inches(0.58), CW, Inches(0.26))
-    p = _para(tf, True, f"{FOOTER}   |   {DATE}   |   {_page[0]}", 10,
-              space_after=0)
-    p.alignment = PP_ALIGN.LEFT
     return s
 
 
 def lines(s, top, items, size=17, gap=11, width=Inches(11.0)):
     """Short statements, one line each where possible.
 
-    The box is clamped to the space left above the footer rather than given a
-    fixed height. A textbox taller than the slide does not complain and does not
-    show -- until someone adds one more line, at which point it clips silently.
+    The box is clamped to the slide rather than given a fixed height. A textbox
+    taller than the slide does not complain and does not show -- until someone
+    adds one more line, at which point it clips silently.
+
+    Returns the measured bottom of the text, not an estimate of it, so whatever
+    is placed underneath does not have to be positioned by eye.
     """
-    tf = _box(s, L0, top, width, min(Inches(4.0), H - top - Inches(0.72)))
+    tf = _box(s, L0, top, width, min(Inches(4.0), H - top - FOOT_MARGIN))
+    width_in = width / 914400
+    used = 0.0
     for i, item in enumerate(items):
         head, tail = item if isinstance(item, tuple) else (item, "")
         p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
         r = p.add_run()
-        r.text = "—  " + head
+        # A plain bullet, not an em dash. The dash read as a stylistic tic
+        # once there were thirty of them down the deck.
+        r.text = "•  " + head
         r.font.size = Pt(size)
         r.font.bold = bool(tail)
         r.font.color.rgb = BLACK
         r.font.name = FONT
+        runs = [(r.text, bool(tail), False)]
         if tail:
             r2 = p.add_run()
             r2.text = "  " + tail
             r2.font.size = Pt(size)
             r2.font.color.rgb = BLACK
             r2.font.name = FONT
+            runs.append((r2.text, False, False))
         p.space_after = Pt(gap)
         p.line_spacing = 1.16
-    return top + Inches(0.40) * len(items)
+        used += text_height(wrapped_lines(runs, width_in, size), size, 1.16, gap)
+    return top + Inches(used)
 
 
 def table(s, top, headers, rows, widths, *, row_h=0.4, size=14):
     n_rows, n_cols = len(rows) + 1, len(headers)
+    grid = [list(headers)] + [list(r) for r in rows]
+
+    # A cell whose text wraps makes PowerPoint grow the row, so a fixed row
+    # height understates the table and anything placed under it by arithmetic
+    # lands on top of it. Measure instead.
+    MARGIN_R, PAD_V = 0.16, 0.08
+    heights = []
+    for r in range(n_rows):
+        need = row_h
+        for c in range(n_cols):
+            n = wrapped_lines([(str(grid[r][c]), r == 0, r == 0)],
+                              widths[c] - MARGIN_R, size)
+            need = max(need, text_height(n, size) + PAD_V)
+        heights.append(need)
+
     shape = s.shapes.add_table(n_rows, n_cols, L0, top,
                                Emu(int(sum(widths) * 914400)),
-                               Inches(row_h * n_rows))
+                               Emu(int(sum(heights) * 914400)))
     tbl = shape.table
     tbl.first_row = False
     tbl.horz_banding = False
@@ -144,7 +228,7 @@ def table(s, top, headers, rows, widths, *, row_h=0.4, size=14):
         tbl.columns[i].width = Inches(w)
 
     for r in range(n_rows):
-        tbl.rows[r].height = Inches(row_h)
+        tbl.rows[r].height = Emu(int(heights[r] * 914400))
         for c in range(n_cols):
             cell = tbl.cell(r, c)
             cell.fill.background()
@@ -162,7 +246,7 @@ def table(s, top, headers, rows, widths, *, row_h=0.4, size=14):
             run.font.italic = r == 0
             run.font.color.rgb = BLACK
             run.font.name = FONT
-    return top + Inches(row_h * n_rows) + Inches(0.18)
+    return top + Inches(sum(heights)) + Inches(0.18)
 
 
 def picture(s, path, top, height_in):
@@ -171,9 +255,19 @@ def picture(s, path, top, height_in):
     return top + Inches(height_in) + Inches(0.16)
 
 
-def note(s, top, text, size=12.5):
-    tf = _box(s, L0, top, Inches(11.0), min(Inches(0.9), H - top - Inches(0.72)))
+def note(s, top, text, size=12.5, width=Inches(11.0)):
+    """The reading of the numbers above it, in the deck's one italic voice.
+
+    Sized to its own measured height. The previous fixed 0.9in cap silently let
+    a fourth line hang below the box, which is invisible on screen and wrong in
+    print.
+    """
+    width_in = width / 914400
+    n = wrapped_lines([(text, False, True)], width_in, size)
+    height = Inches(text_height(n, size, 1.3))
+    tf = _box(s, L0, top, width, min(height, H - top - FOOT_MARGIN))
     _para(tf, True, text, size, space_after=0, line=1.3, italic=True)
+    return top + height
 
 
 # ---------------------------------------------------------------- figures --
@@ -212,17 +306,17 @@ def fig_null(null, deep_d) -> Path:
     # vlines, not axvline: the marker must stop below its own label, or the rule
     # is drawn straight through the text.
     ax.vlines(deep_d, -0.10, 0.50, color="black", lw=2.4, zorder=4)
-    ax.annotate(f"observed  d = {deep_d:+.3f}", xy=(deep_d, 0.60), ha="center",
+    ax.annotate(f"attack result  d = {deep_d:+.3f}", xy=(deep_d, 0.60), ha="center",
                 fontsize=12, fontweight="bold", fontname="Times New Roman")
-    ax.text(-2.12, 0.50, "d ≤ −0.8", fontsize=11,
+    ax.text(-2.12, 0.50, "past the threshold", fontsize=11,
             fontname="Times New Roman")
-    ax.text(2.12, 0.50, "d ≥ 0.8", fontsize=11, ha="right",
+    ax.text(2.12, 0.50, "past the threshold", fontsize=11, ha="right",
             fontname="Times New Roman")
 
     ax.set_xlim(-2.2, 2.2)
     ax.set_ylim(-0.12, 0.74)
     ax.set_yticks([])
-    ax.set_xlabel("Cohen's d, control vs control (20 draws, 5 seeds each)",
+    ax.set_xlabel("Effect size measured with no attacker present (20 repeats, 5 runs each)",
                   fontsize=12, fontname="Times New Roman", labelpad=7)
     ax.spines["left"].set_visible(False)
     _style(ax)
@@ -246,7 +340,7 @@ def fig_curve() -> Path:
     ax.axhline(CE_PREDICTED_INIT, color="black", ls=(0, (5, 4)), lw=1.0)
     # Above the rule, not on it: va="center" puts the dashes through the glyphs.
     ax.text(9.3, CE_PREDICTED_INIT + 0.06,
-            f"predicted at init  {CE_PREDICTED_INIT}", va="bottom", ha="right",
+            f"predicted in advance  {CE_PREDICTED_INIT}", va="bottom", ha="right",
             fontsize=11, fontname="Times New Roman")
     ax.plot(xs, CE_CURVE, color="black", lw=1.8, zorder=3)
     ax.scatter(xs, CE_CURVE, s=58, color="black", zorder=4,
@@ -260,9 +354,9 @@ def fig_curve() -> Path:
     ax.set_xticks(xs)
     ax.grid(axis="y", color="black", alpha=0.12, lw=0.7)
     ax.set_axisbelow(True)
-    ax.set_xlabel("Inner-loop chunk", fontsize=12, fontname="Times New Roman",
+    ax.set_xlabel("Section of text read (1,024 tokens each)", fontsize=12, fontname="Times New Roman",
                   labelpad=7)
-    ax.set_ylabel("nats / token", fontsize=12, fontname="Times New Roman",
+    ax.set_ylabel("Prediction error (nats)", fontsize=12, fontname="Times New Roman",
                   labelpad=7)
     _style(ax)
     fig.tight_layout()
@@ -278,12 +372,14 @@ def build() -> Path:
     FIG_DIR.mkdir(parents=True, exist_ok=True)
 
     deep = json.loads((R002 / "deep.json").read_text())
-    pilot = json.loads((R002 / "pilot.json").read_text())
     null = json.loads((R002 / "null.json").read_text())
 
     deep_d = deep["effect_size"]
+    floor_d = deep["noise_floor_effect_size"]
+    rel = deep["relative_degradation"]
     fpr = null["false_positive_rate_at_bar"]
-    n_clear = round(fpr * null["n_draws"])
+    n_draws = null["n_draws"]
+    n_clear = round(fpr * n_draws)
 
     f_null = fig_null(null, deep_d)
     f_curve = fig_curve()
@@ -291,181 +387,340 @@ def build() -> Path:
     prs = Presentation()
     prs.slide_width, prs.slide_height = W, H
 
+    # Written for a reader with no contact with the project: no experiment
+    # numbers, file names, commit pins or hardware model numbers on any slide.
+    # docs/ORIENTATION.md is the long form for anyone who wants those.
+
     # -- 1. title -----------------------------------------------------------
     s = prs.slides.add_slide(prs.slide_layouts[6])
     s.background.fill.solid()
     s.background.fill.fore_color.rgb = WHITE
-    tf = _box(s, L0, Inches(2.7), Inches(11.0), Inches(1.7))
+    tf = _box(s, L0, Inches(2.7), Inches(11.0), Inches(1.24))
     _para(tf, True, "Trust-Gated Fast-Weight Updates for TTT-E2E LLMs", 36,
-          bold=True, space_after=14, line=1.06)
-    _para(tf, False, "Status of work — what has been measured", 20,
-          space_after=0)
+          bold=True, space_after=0, line=1.06)
     _rule(s, Inches(4.86), width=Inches(3.0), weight=1.25)
-    tf = _box(s, L0, Inches(5.06), Inches(11.0), Inches(0.8))
-    _para(tf, True, DATE, 14, space_after=4)
-    _para(tf, False,
-          "vendor pin a4fc478   |   corpus pin cc2adbc8   |   spend to date $0.13",
-          13, space_after=0)
 
-    # -- 2. summary ---------------------------------------------------------
-    s = slide(prs, "Summary")
+    # -- 2. the problem -----------------------------------------------------
+    s = slide(prs, "The problem")
     y = lines(s, BODY_TOP, [
-        ("Done.", "002 complete and reproducible. 003 executes the vendor model. "
-                  "Cost model measured against the live bucket. Realism bar now "
-                  "scorable; Phase 1 harness runs end to end."),
-        ("Not done.", "Kill-gate (001). Fast-weight carry. 1B baseline."),
-        ("Verdict.", "None. Nothing here is a PROCEED or a STOP."),
-        ("Spend.", "$0.13, one GCS transfer. All compute so far on free hardware."),
-    ], size=17)
-    y = table(s, y + Inches(0.25),
-              ["Pre-registered bar", "Value", "Status"],
-              [["Cohen's d", "≥ 0.80", "frozen 2026-08-08, untouched"],
-               ["Relative degradation", "≥ 10%", "frozen 2026-08-08, untouched"],
-               ["Fluency ratio", "≤ 1.5", "frozen 2026-08-08, scorable from 2026-09-16"]],
-              [3.6, 2.2, 5.0])
+        ("Models that keep learning.",
+         "A new kind of language model, TTT-E2E, keeps adjusting part of its "
+         "own internal settings while it reads. This is what lets it handle "
+         "very long documents cheaply. The part that changes is called the "
+         "fast weights."),
+        ("Why that is a risk.",
+         "If a model learns from whatever it reads, then whoever controls what "
+         "it reads can influence what it learns. An attacker who slips "
+         "ordinary-looking text into a document, email or web page might steer "
+         "the model into doing worse on later, unrelated requests."),
+        ("Why current defences would miss it.",
+         "No single sentence in such an attack looks suspicious, so content "
+         "filters have nothing to catch. The model's original, stored settings "
+         "are never touched, so checks on those see nothing either."),
+    ], size=16, gap=10)
+    note(s, y + Inches(0.14),
+         "If this attack exists, it would be quiet, gradual, and invisible to "
+         "the tools used to protect language models today. This project first "
+         "tests whether it exists, and builds a defence only if it does.")
 
-    # -- 3. experiment 002 --------------------------------------------------
-    s = slide(prs, "Experiment 002 — scaled-down pilot")
+    # -- 3. the proposed defence --------------------------------------------
+    s = slide(prs, "The proposed defence")
     y = lines(s, BODY_TOP, [
-        "Victim: ~0.1M-parameter byte-level TTT stand-in. Not TTT-E2E.",
-        "Attacker selects real spans from a benign corpus and chooses their order.",
-        "Base weights frozen; only the fast MLP is updated, by SGD, once per chunk.",
-    ], size=16, gap=8)
-    y = table(s, y + Inches(0.20),
-              ["Measurement", "Observed", "Bar"],
-              [["Effect size (Cohen's d)", f"{deep_d:+.3f}", "≥ 0.80"],
-               ["Relative degradation",
-                f"{deep['relative_degradation'] * 100:+.4f}%", "≥ 10%"],
-               ["Inner-loop adaptation", f"{deep['inner_loop_gain_nats']:.4f} nats",
-                f"vs {deep['shallow_inner_loop_gain_nats']} with shallow base"],
-               ["Position in own null", "0th percentile", "—"]],
-              [3.6, 2.6, 4.6])
+        ("A check on every change.",
+         "Each time the model is about to update its fast weights, a trust gate "
+         "inspects the change first and can refuse it."),
+        ("What it looks for.",
+         "Whether the change would pull the model's answers away from those of "
+         "a frozen, trusted copy of itself, tested on a small rotating set of "
+         "passages the attacker cannot see."),
+        ("A cap on total change.",
+         "The gate keeps a running total of how far the model has moved. Once "
+         "that total reaches a set budget, further changes are refused, however "
+         "harmless each one looks on its own."),
+        ("A way back.",
+         "Recent trusted versions of the fast weights are kept, so the model "
+         "can be restored instantly."),
+    ], size=16, gap=10)
+    note(s, y + Inches(0.14),
+         "The cap on total change is the part that can be proven. Within each "
+         "budget period, the model cannot move further from its trusted "
+         "starting point than the budget allows, whatever the attacker feeds "
+         "it. That is a mathematical guarantee rather than a detection rate, "
+         "and it holds even for harmful changes the gate fails to recognise.")
+
+    # -- 4. how the decision is made ----------------------------------------
+    s = slide(prs, "Deciding whether to build it")
+    y = lines(s, BODY_TOP, [
+        ("Attack first, defence second.",
+         "A defence against an attack nobody has shown to work would be wasted "
+         "effort. So the first job is to test, on the real model, whether the "
+         "attack works at all."),
+        ("Rules fixed in advance.",
+         "What counts as a working attack was written down and committed on "
+         "28 July 2026, before any attack code existed. It cannot be adjusted "
+         "after the results are in."),
+    ], size=16, gap=10)
+    y = table(s, y + Inches(0.18),
+              ["Condition", "Threshold", "In plain terms"],
+              [["Effect size (Cohen's d)", "≥ 0.80",
+                "attacked and normal runs must differ by far more than chance"],
+               ["Loss of performance", "≥ 10%",
+                "the model must get at least a tenth worse at ordinary tasks"],
+               ["Naturalness of the attack text", "≤ 1.5",
+                "the attack text must read almost as naturally as normal text, "
+                "judged by a separate model"]],
+              [3.2, 1.3, 6.5])
     note(s, y + Inches(0.04),
-         "The attack moves benign loss by nothing. The mechanism it attacks "
-         "measurably adapts, so this is a null from a working inner loop.")
+         "All three must hold. If they do, the defence gets built. If any one "
+         "fails, the project stops and publishes that finding, which is a "
+         "useful result in its own right.")
 
-    # -- 4. the null --------------------------------------------------------
-    s = slide(prs, "Experiment 002 — null distribution")
-    y = picture(s, f_null, BODY_TOP, 2.95)
-    y = lines(s, y + Inches(0.10), [
-        f"{n_clear} of {null['n_draws']} control-vs-control draws clear "
-        f"|d| ≥ 0.80. False-positive rate {fpr:.0%}.",
-        f"Median |d| {null['null_abs_median']:.3f}, "
-        f"max {null['null_abs_max']:.3f}, 5 seeds per draw.",
-        f"Shallow pilot, same run: d = {pilot['effect_size']:.3f} poison-vs-control, "
-        f"{pilot['noise_floor_effect_size']:.3f} control-vs-control.",
-    ], size=15.5, gap=7)
-
-    # -- 5. reproducibility -------------------------------------------------
-    s = slide(prs, "Reproducibility defect — found and fixed")
+    # -- 5. where things stand ----------------------------------------------
+    s = slide(prs, "Where things stand")
     y = lines(s, BODY_TOP, [
-        "The pilot's corpus was a live glob of this repository's own markdown, "
-        "resolved at run time.",
-        "Every commit touching a .md file changed the experiment.",
+        ("Done.", "The measuring tools are built and tested. A small practice "
+                  "version of the experiment runs on a fixed, verified input. "
+                  "The real model has been run for the first time. Costs have "
+                  "been measured rather than guessed."),
+        ("Not done.", "The decisive test on the real model. It needs a rented "
+                      "data-centre GPU, which is being arranged."),
+        ("Verdict.", "None yet. Nothing in this deck says whether the attack "
+                     "works."),
+        ("Spent.", "$0.13 in total. All computing so far has used free "
+                   "hardware."),
+    ], size=17)
+    note(s, y + Inches(0.14),
+         "Most of what follows is groundwork for an answer that can be trusted: "
+         "testing the measuring tools, finding and fixing errors in them, and "
+         "costing the real test before paying for it.")
+
+    # -- 6. the small stand-in ----------------------------------------------
+    s = slide(prs, "A first test on a small stand-in model")
+    y = lines(s, BODY_TOP, [
+        ("Why a stand-in.",
+         "The real model needs expensive hardware, so the whole pipeline was "
+         "first run on a tiny model built the same way, with about 100,000 "
+         "adjustable settings instead of a billion."),
+        ("What the attacker could do.",
+         "Only choose which real, harmless sentences to feed the model, and in "
+         "what order. No invented or unusual text."),
     ], size=16, gap=8)
     y = table(s, y + Inches(0.18),
-              ["Quantity", "Before", "After"],
-              [["Corpus", "672 KB, 47 files, drifting", "615,141 B, frozen, hashed"],
-               ["Shallow pilot d", "+0.0535 → −1.2838", "+0.872"],
-               ["Deep pilot d", "+0.8313", "−0.003"],
-               ["Null false-positive rate", "55%", "15%"]],
-              [3.4, 3.9, 3.8])
+              ["Measurement", "Result", "How to read it"],
+              [["Effect size (Cohen's d)", f"{deep_d:+.3f}",
+                "far below the 0.80 required"],
+               ["Same measurement, no attacker", f"{floor_d:+.3f}",
+                "bigger than the attack's effect, so that effect is just noise"],
+               ["Loss of performance", f"{rel * 100:.4f}%",
+                f"about {round(0.10 / rel)} times smaller than the 10% required"],
+               ["Learning while reading",
+                f"{deep['inner_loop_gain_nats']:.4f} nats",
+                f"clearly active (a model with almost no capacity to adapt "
+                f"scores {deep['shallow_inner_loop_gain_nats']})"]],
+              [3.2, 1.8, 6.0])
     note(s, y + Inches(0.04),
-         "Editing two unrelated README files moved d across zero and past the bar "
-         "in the opposite direction. corpus.txt is now pinned by SHA-256 and "
-         "checked on load; a mismatch refuses to run.")
+         "The attack had no measurable effect on this small model. Because the "
+         "model was genuinely learning from what it read, this is a real "
+         "negative result rather than a broken test. It says nothing yet about "
+         "the full-size model, which is around ten thousand times larger and "
+         "built differently in important ways.")
 
-    # -- 6. experiment 003 --------------------------------------------------
-    s = slide(prs, "Experiment 003 — first execution of the vendor model")
-    y = table(s, BODY_TOP,
-              ["Measurement", "Observed", "Reconstructed"],
-              [["Trainable parameters", "184,363,776",
-                "matches to within RMSNorm weights"],
-               ["Inner (fast) weights", "11,501,568",
-                "3 × 3 × 768 × 1664, exact"],
-               ["Attack surface", "6.24%", "of trainable parameters"]],
-              [3.3, 2.6, 5.2])
-    y = picture(s, f_curve, y + Inches(0.02), 2.55)
-    note(s, y - Inches(0.02),
-         "125M random init, dummy tokens, seq 8192, RTX 3070 Ti, bf16. Falls "
-         "2.035 nats over 8 chunks. Chunk 1 within 0.030 nats of a value "
-         "predicted from two config constants.")
-
-    # -- 7. cost model ------------------------------------------------------
-    s = slide(prs, "Cost model — measured against the live bucket")
-    y = table(s, BODY_TOP,
-              ["Quantity", "Assumed", "Measured", "Consequence"],
-              [["/val tokens", "50M – 1B", "2,000,168,321",
-                "eval 0.9 h → 7.45 h"],
-               ["Storage codec", "Blosc ≈ 2.5×", "uncompressed",
-                "chunk subsampling possible"],
-               ["1B checkpoint", "5.9 GB", "5.35 GB", "inside stated ±10%"],
-               ["Session total", "≈ 4 h", "≈ 10.5 h",
-                "collides with 12 h stop"]],
-              [2.5, 2.2, 2.8, 3.8])
-    note(s, y + Inches(0.04),
-         "/val is 21 chunks of exactly 100,000,000 tokens. Three chunks give "
-         "SE 0.0015 nats against a 0.491-nat band, for 1.12 h instead of 7.45. "
-         "Fixed in writing before any baseline result is seen.")
-
-    # -- 8. harness ---------------------------------------------------------
-    s = slide(prs, "Phase 1 harness — executable end to end")
-    y = lines(s, BODY_TOP, [
-        ("Fluency reference.", "GPT-2 small. Independent of the victim on "
-                               "corpus, tokenizer, and the fact that it does "
-                               "not adapt at inference."),
-        ("Spike entry point.", "Refused every real run until today. Now runs "
-                               "against a victim built with no weights."),
-    ], size=16, gap=8)
-    y = table(s, y + Inches(0.20),
-              ["Check", "Observed", "Bar"],
-              [["Reference discrimination, fluent vs scrambled", "66.4×", "> 2×"],
-               ["Logit equivalence vs reference implementation", "5.798e-04",
-                "< 1e-03"],
-               ["Argmax agreement, sequence 1 to 1024", "100%", "—"],
-               ["CPU test suite", "319 passing", "was 281"]],
-              [5.4, 2.4, 3.2])
-    note(s, y + Inches(0.04),
-         "The realism bar was frozen on 2026-08-08 and recorded as not yet "
-         "scorable. It is now scorable. The bar did not move. A weightless "
-         "victim has nothing to corrupt, so the harness run it enables renders "
-         "no verdict and its report says so above the verdict line.")
-
-    # -- 9. scope -----------------------------------------------------------
-    s = slide(prs, "Not established")
-    y = lines(s, BODY_TOP, [
-        ("No kill-gate verdict.", "001 not run. PREREGISTERED.md untouched."),
-        ("No fast-weight carry result.", "8 GB card is ~2 GB short. L4 24 GB "
-                                         "procured; not yet run."),
-        ("No 1B baseline.", "Needs rented Ampere. Kaggle and Colab excluded — "
-                            "cuDNN fused attention requires SM80+."),
-        ("002 is not TTT-E2E.", "0.1M-parameter stand-in, realism bar unscored, "
-                                "cannot return PROCEED."),
-    ], size=16)
-    note(s, y + Inches(0.30),
-         "Seven first-launch failures found and fixed on free hardware, including "
-         "a checkpoint restore path that raises on the released artefact and a "
-         "sequence-length reduction that returns NaN rather than an error.")
-
-    # -- 9. next ------------------------------------------------------------
-    s = slide(prs, "Next")
-    y = table(s, BODY_TOP,
-              ["Step", "Requires", "Cost"],
-              [["1. Fast-weight carry (003)", "L4 24 GB, no checkpoint",
-                "~1 h, ≈ ₹50"],
-               ["2. Harness wiring run, 001 path", "same session, no checkpoint",
-                "~0.5 h, ≈ ₹25"],
-               ["3. 125M rehearsal", "checkpoint already fetched", "~0.5 h"],
-               ["4. 1B baseline vs 2.314–2.805", "3 /val chunks, A100 80 GB",
-                "≈ 4 h, ≈ ₹740"],
-               ["5. Kill-gate (001)", "all of the above", "separate session"]],
-              [4.4, 4.0, 2.9])
+    # -- 7. checking the tool -----------------------------------------------
+    s = slide(prs, "Checking the measuring tool itself")
+    y = picture(s, f_null, BODY_TOP, 2.45)
+    y = lines(s, y + Inches(0.08), [
+        ("How to read the chart.",
+         f"Each dot is one of {n_draws} repeats of the measurement with no "
+         f"attacker present, placed left or right by the effect size it "
+         f"reported. With nothing to find, every dot should sit near the "
+         f"middle. The dashed lines mark the 0.80 threshold, and dots in or at "
+         f"the edge of the grey zones are false alarms. The bold line is the "
+         f"attack's result from the previous slide."),
+        ("What it shows.",
+         f"{n_clear} of the {n_draws} crossed the threshold with nothing to "
+         f"find, a false-alarm rate of about {fpr:.0%}. The attack's result "
+         f"sits among the no-attacker dots, so it cannot be told apart from "
+         f"chance."),
+    ], size=15, gap=7)
     note(s, y + Inches(0.06),
-         "Step 1 retires the project's named principal technical risk; step 2 "
-         "leaves weights as the only missing input. Step 4 is costed at 80 GB, "
-         "not 40: the eval batch is floored at 8 independently of "
-         "global_batch_size, which the earlier 40 GB estimate did not carry. "
-         "Step 5 must be read against the 15% false-positive rate above.")
+         "This is a finding about the rule itself. With five runs per condition, "
+         "clearing the threshold once is not proof of an attack. The threshold "
+         "was deliberately left unchanged, since moving it after seeing data "
+         "would defeat the point of fixing it in advance.")
+
+    # -- 8. our own error ---------------------------------------------------
+    s = slide(prs, "An error in our own experiment, found and fixed")
+    y = lines(s, BODY_TOP, [
+        ("The error.",
+         "The practice experiment read its text from the project's own "
+         "documentation at the moment it ran. Every edit to the documentation "
+         "quietly changed the experiment's input."),
+        ("Why it mattered.",
+         "Editing two unrelated files was enough to swing the result from "
+         "slightly positive to strongly negative, past the threshold in the "
+         "wrong direction. Identical code gave different answers on different "
+         "days."),
+    ], size=16, gap=8)
+    y = table(s, y + Inches(0.18),
+              ["", "Before the fix", "After the fix"],
+              [["Input text", "read live, changed with every edit",
+                "frozen copy, checked before each run"],
+               ["If the input changes", "result silently moves (+0.05 to −1.28)",
+                "the run refuses to start"],
+               ["False-alarm rate", "55%", f"{fpr:.0%}"]],
+              [3.0, 4.0, 4.0])
+    note(s, y + Inches(0.04),
+         "The error was in this project's own code, and it was caught before it "
+         "could lead to a wrong conclusion. Every result in this deck was "
+         "produced after the fix. The 55% false-alarm rate belongs to the "
+         "faulty setup and should not be quoted.")
+
+    # -- 9. the real model --------------------------------------------------
+    s = slide(prs, "Running the real model for the first time")
+    y = lines(s, BODY_TOP, [
+        "A small, untrained version of the real model, run only to confirm "
+        "our code drives it correctly.",
+    ], size=16, gap=4)
+    y = table(s, y + Inches(0.10),
+              ["Measurement", "Result", "What it means"],
+              [["Adjustable settings in total", "184,363,776",
+                "matches the published design"],
+               ["Settings rewritten while reading", "11,501,568",
+                "the part an attacker could influence"],
+               ["Share open to influence", "6.24%", "about 1 setting in 16"]],
+              [3.6, 2.3, 5.1])
+    y = picture(s, f_curve, y + Inches(0.02), 1.72)
+    note(s, y - Inches(0.04),
+         f"How to read the chart: each point is one section of 1,024 tokens, "
+         f"read in order, and its height is the model's prediction error on "
+         f"that section, so lower is better. The dashed line is the starting "
+         f"error worked out in advance from the model's design. The first point "
+         f"lands within {abs(CE_CURVE[0] - CE_PREDICTED_INIT):.3f} of it, which "
+         f"confirms the setup is right, and the line then drops by "
+         f"{max(CE_CURVE) - min(CE_CURVE):.3f} as the model reads. That drop is "
+         f"the fast weights learning from what they read in real time, which is "
+         f"exactly the behaviour an attacker would try to exploit.")
+
+    # -- 10. costing it -----------------------------------------------------
+    s = slide(prs, "Costing the real test before paying for it")
+    y = table(s, BODY_TOP,
+              ["Item", "Assumed", "Found on checking", "Consequence"],
+              [["Evaluation text", "up to 1 billion tokens", "2.0 billion tokens",
+                "a full pass takes about 7.5 hours, not under 1"],
+               ["Model file", "5.9 GB", "5.35 GB", "within the expected range"],
+               ["GPU memory needed", "about 25 GB", "36 to 49 GB, estimated",
+                "an 80 GB card is required"],
+               ["Whole session", "about 4 hours", "about 10.5 hours",
+                "too close to the 12-hour spending limit"]],
+              [2.4, 2.3, 2.5, 3.8])
+    note(s, y + Inches(0.04),
+         "All of this was found by inspecting data and code for free, before "
+         "renting anything. Because the full evaluation text is too large to "
+         "use in one session, the real test will use a fixed sample of it. The "
+         "sample is still far larger than needed to detect the differences "
+         "that matter, and it was chosen and written down before any result was "
+         "seen.")
+
+    # -- 11. the tools ------------------------------------------------------
+    s = slide(prs, "The measuring tools are ready")
+    y = lines(s, BODY_TOP, [
+        ("An independent judge.",
+         "Whether attack text reads naturally is scored by a separate, "
+         "well-known model, GPT-2, never by the model under attack. A "
+         "compromised model cannot be trusted to judge."),
+        ("The full test runs end to end.",
+         "Every step of the decisive test now runs. With an untrained model "
+         "plugged in, it gives no verdict and says so at the top of its report."),
+    ], size=16, gap=8)
+    y = table(s, y + Inches(0.18),
+              ["Check", "Result", "Required", "What it shows"],
+              [["Tells normal text from scrambled text", "66×", "> 2×",
+                "the judge spots unnatural text easily"],
+               ["Difference from the official GPT-2", "0.0006", "< 0.001",
+                "our copy is the same model"],
+               ["Agrees on the next word", "100%", "",
+                "identical choices over 1,024 tokens"],
+               ["Automated tests on the tools", "319 passing", "",
+                "checked by code, not by eye"]],
+              [4.0, 1.5, 1.4, 4.1])
+    note(s, y + Inches(0.04),
+         "The naturalness condition could not be scored until a trustworthy "
+         "judge existed. It can be now, at the same threshold set in July.")
+
+    # -- 12. not yet known --------------------------------------------------
+    s = slide(prs, "What is not yet known")
+    y = lines(s, BODY_TOP, [
+        ("Whether the attack works on the real model.",
+         "The decisive test has not been run, so there is no verdict."),
+        ("Whether the real model's learning builds up correctly over a long "
+         "text.",
+         "This check could not finish on a home graphics card. A 24 GB card "
+         "has been arranged."),
+        ("How the full-size model behaves.",
+         "It needs a rented 80 GB data-centre GPU. Free services such as Colab "
+         "and Kaggle cannot run it."),
+        ("Anything about the real model from the small test.",
+         "The practice model is far smaller and built differently, so its "
+         "result does not carry over."),
+    ], size=16)
+    note(s, y + Inches(0.20),
+         "This slide is here so the earlier results are not read as more than "
+         "they are. Along the way, seven setup failures were found and fixed on "
+         "free hardware, each of which would otherwise have cost paid GPU time.")
+
+    # -- 13. next -----------------------------------------------------------
+    s = slide(prs, "Next steps")
+    y = table(s, BODY_TOP,
+              ["Step", "Needs", "Estimated cost"],
+              [["1. Finish the real-model check", "rented 24 GB GPU",
+                "about 1 hour, ≈ ₹50"],
+               ["2. Dry run of the full test", "same session",
+                "about 30 minutes, ≈ ₹25"],
+               ["3. Rehearsal on a small trained model",
+                "model file already downloaded", "about 30 minutes"],
+               ["4. Confirm the full-size model is set up correctly",
+                "rented 80 GB GPU", "about 4 hours, ≈ ₹740"],
+               ["5. The decisive test", "all of the above", "separate session"]],
+              [5.0, 3.6, 2.4])
+    note(s, y + Inches(0.06),
+         f"Steps 1 to 4 make sure the final answer can be trusted, and step 5 "
+         f"gives it. Either outcome, attack confirmed or not, is worth "
+         f"publishing. Step 5 will be read against the {fpr:.0%} false-alarm "
+         f"rate found earlier.")
+
+    # -- 14. glossary -------------------------------------------------------
+    s = slide(prs, "Glossary")
+    y = table(s, BODY_TOP,
+              ["Term", "Meaning"],
+              [["TTT-E2E",
+                "A recent language model design that keeps learning from its "
+                "input while running, to handle very long texts."],
+               ["Fast weights",
+                "The part of such a model that changes while it reads. The "
+                "target of the attack."],
+               ["Trust gate",
+                "The proposed defence: a check on every change to the fast "
+                "weights, with a cap on total change."],
+               ["Kill gate",
+                "The one-time decision on whether the attack is real enough to "
+                "justify building the defence."],
+               ["Pre-registration",
+                "Writing down the success criteria before an experiment, so "
+                "they cannot be bent to fit the results."],
+               ["Cohen's d",
+                "A standard measure of how far apart two sets of results are, "
+                "relative to their natural spread. 0.8 counts as large."],
+               ["Null test",
+                "Running a measurement with nothing to find, to learn how often "
+                "it raises a false alarm."],
+               ["Token",
+                "A word or part of a word, the unit a language model reads."],
+               ["Nats",
+                "A unit of prediction error. Lower means the model is better at "
+                "guessing the next token."]],
+              [2.2, 8.8], size=13)
+    note(s, y + Inches(0.06),
+         f"Deck prepared {DATE}. Total spend to date: $0.13.")
 
     try:
         prs.save(OUT)
