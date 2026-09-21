@@ -1,5 +1,15 @@
 # GPU session 1: runbook
 
+> **Revised 2026-09-21 (evening): E2E Networks, Manas operating.** Jaykay's A100 quota
+> request was refused on submission, so the GPU is rented from **E2E Networks** (₹189/h
+> + GST, paid by UPI). The data still comes from Google Cloud: both buckets are
+> requester-pays, and the downloads (~6.5 GB, ~$1-2) are billed to **Jaykay's GCP
+> project** through a service-account key that holds one role, Service Usage Consumer.
+> Part B below is the E2E version. Parts C and D run unchanged, apart from how files come
+> off the box. Everything written about the in-project GCP route is superseded where Part
+> B says so. The step-by-step operator page is the "Session 1 Field Protocol"
+> (https://claude.ai/artifact/GeBm35yqY6eMbqRZTwM8Tt).
+
 > **One page, in order.** Rewritten 2026-09-20. The previous version routed around a
 > Google Cloud lockout and a UPI-only payment constraint: a teammate issued a
 > **service-account key**, the box downloaded with it, and the compute ran on **E2E
@@ -18,12 +28,12 @@
 
 | Item | Estimate | Note |
 |---|---|---|
-| Checkpoint + `/val` download | ~5.75 GB, **$0** | In-project, same-region. The old plan's ₹60–120 egress line does not exist any more. |
-| **A100 80 GB** (`a2-ultragpu-1g`), on-demand | ~$4–5/h | Confirm at the console; it varies by region. |
+| Checkpoint + `/val` + `/train` chunk 0 download | ~6.5 GB, **~$1–2** | Internet egress to India, billed to Jaykay's project via the service-account key. |
+| **A100 80 GB** on E2E Networks, on-demand hourly | ₹189/h + 18% GST ≈ ₹223/h | UPI prepaid balance. A powered-off node still bills; only deleting stops it. |
 | 000 baseline | ~1 h | 50M tokens, two runs plus the control |
 | 001 kill gate | **see the warning below** | The one number nobody has measured |
 | Sequence arms + Phase 2 | ~1–2 h | |
-| **Session total** | well under the credit | Money is not the binding constraint. Quota is. |
+| **Session total** | ≈ ₹1,400–1,800 for 6–8 h | Top up the E2E balance for 8 h plus a buffer before starting. |
 
 **Why these choices:**
 - **A100 80 GB, not H100.** `PREREGISTERED.md`'s frozen Setup names "single A100/H100
@@ -50,6 +60,9 @@ Every item must pass. If one fails, nothing gets rented.
 
 ### A0. The GCP account is actually able to rent a GPU (Jaykay, ~10 min, possibly ~1 day)
 
+> **Superseded 2026-09-21:** the A100 quota request was refused, and the GPU now comes
+> from E2E Networks (Part B). Jaykay's project only pays for the downloads.
+
 **This is the schedule risk, not the money.** Upgrading past the free trial makes the
 account *eligible* to ask for GPUs; it does not grant any.
 
@@ -65,6 +78,10 @@ account *eligible* to ask for GPUs; it does not grant any.
 working around it.
 
 ### A1. In-project access works (Jaykay, ~2 min)
+
+> **Now done with the service-account key.** Jaykay runs the same checks in Cloud Shell
+> with the key activated in a throwaway `CLOUDSDK_CONFIG` before sending it (the steps
+> Manas forwarded). The expected output below is unchanged.
 
 No service-account key. No key on rented hardware. From Cloud Shell or any box with
 ambient application-default credentials in the project:
@@ -149,57 +166,90 @@ Jaykay must be reachable **for the whole session**, not only the download.
 
 ## Part B: on the box (billing starts)
 
-### B1. Create the instance (0:00)
+### B0. Before renting (Manas, on the laptop, free)
+
+You need all of these before creating the node:
+- **`sa-key.json` from Jaykay**, saved **outside the repo**, e.g. `C:\Users\manas\sa-key.json`
+  (the repo is public, and the bootstrap refuses a key inside it). Jaykay has already
+  proved it reads both buckets from his Cloud Shell. Also get **his project ID**.
+- **W&B:** `preflight_wandb.py` printed `PREFLIGHT OK` for entity
+  `manasmaahir27-vellore-institute-of-technology`, project `ttt-trustgate-session1`.
+- **An SSH key** registered with E2E. In PowerShell, `ssh-keygen -t ed25519` if
+  `~\.ssh\id_ed25519.pub` does not exist yet. Then add the `.pub` file's contents under
+  MyAccount → SSH Keys.
+- **E2E balance** topped up by UPI for about 8 hours (≈ ₹1,800) plus a buffer.
+- A claim row in `gpu-bookings.md` (A7).
+
+### B1. Create the node (0:00)
 
 ```
-Machine type : a2-ultragpu-1g   (1 x A100 80GB)
-Provisioning : on-demand, NOT Spot
-Image        : Deep Learning VM with CUDA >= 12.8, or Ubuntu 22.04 + CUDA >= 12.8
-Disk         : >= 200 GB balanced PD   (checkpoint, dataset, and two runs of artifacts)
-Scopes       : default service account, "Allow full access to all Cloud APIs"
-               (IAM still limits it; a narrow scope is a failure 35 min into the bootstrap)
-External IP  : keep the default ephemeral IP (uv sync and the GPT-2 fetch need internet)
-Metadata     : install-nvidia-driver = True   (Deep Learning VM images)
-Region       : the one A0 step 3 settled on
+Console      : MyAccount -> Compute -> Nodes -> Create -> GPU tab -> NVIDIA A100 80GB
+Plan         : 1x A100 80GB, hourly on-demand. NOT spot, NOT committed.
+               The plan label reads <vCPU>-<RAM>-<GPU mem>-<CUDA>-<disk>-<IOPS>:
+               pick one showing CUDA >= 12.8 and disk >= 200 GB.
+OS           : Ubuntu 22.04 (24.04 also fine)
+SSH key      : the one from B0
+Backup (CDP) : off (extra cost, and nothing on the box needs it)
+Public IP    : yes (uv sync, the GCS download and the GPT-2 fetch all need internet)
+Security     : default group (SSH, port 22)
+Location     : whichever of Delhi NCR / Chennai has an A100 80GB free
 ```
 
-The operator's walkthrough, with a console field-by-field guide and every command,
-lives in the shared "Session 1 Field Protocol" page
-(https://claude.ai/artifact/GeBm35yqY6eMbqRZTwM8Tt, shared with Jaykay).
+**A powered-off node still bills.** Only deleting it stops the meter (E2E's own docs).
 
-### B2. Log in and clone (0:05)
+### B2. Key onto the box, log in, clone (0:05)
+
+On the laptop, in PowerShell. `root` is E2E's default login, and the node's page shows
+the IP and the user:
+
+```powershell
+scp $HOME\sa-key.json root@<IP>:~/sa-key.json
+ssh root@<IP>
+```
+
+On the box:
 
 ```bash
-gcloud compute ssh <instance> --zone <zone>
-tmux new -s ttt                       # always; reattach with: tmux attach -t ttt
-nvidia-smi                            # CUDA Version must be >= 12.8, else delete the instance now
-git clone --recursive <repo-url> TTT
-cd TTT && git checkout infra/gpu-session-1
+apt-get update -y && apt-get install -y git tmux    # prefix sudo if not root
+tmux new -s ttt                        # always; reattach with: tmux attach -t ttt
+nvidia-smi                             # A100 80GB, CUDA Version >= 12.8, else delete the node now
+chmod 600 ~/sa-key.json
+cd ~ && git clone --recursive https://github.com/Manas-Maahir/Trust-Gated-Fast-Weight-Updates-for-TTT-E2E-LLMs.git TTT
+cd TTT && git checkout infra/gpu-session-1 && git log --oneline -1
 ```
 
-**No `scp` of any credential.** The instance's own service account reads the bucket.
+The key sits at `~/sa-key.json`, outside `~/TTT`. That is the only credential file on
+the box.
 
-### B3. Bootstrap (0:10, ~35 min)
+### B3. Bootstrap (0:10, ~35-45 min)
 
 ```bash
-export WANDB_ENTITY=…  WANDB_PROJECT=…  WANDB_KEY=…
-export GCP_BILLING_PROJECT=<Jaykay's project id>   # the bootstrap requires it for the requester-pays reads
+export WANDB_ENTITY=manasmaahir27-vellore-institute-of-technology WANDB_PROJECT=ttt-trustgate-session1
+read -rs -p "W&B key: " WANDB_KEY; echo; export WANDB_KEY     # typed hidden, not in history
+export GCP_BILLING_PROJECT=<Jaykay's project id> GCP_SA_KEY=$HOME/sa-key.json
 bash scripts/bootstrap_gpu_box.sh
 ```
 
-**Leave `GCP_SA_KEY` unset.** On a GCE VM the instance's default service account is
-already the active gcloud account, so the script's active-account check at `:176` passes
-without a key. The key path is left over from the old route and is dead in-project. **Keep its check at `:329-344`**: the checkpoint directory
-must contain an integer-named step directory, or orbax reports "No checkpoints found",
-which reads like a missing checkpoint rather than a wrong path.
+It installs `uv` and the Google Cloud SDK itself (neither is on an E2E image), activates
+the key, and checks GCS access **before** anything slow. The download runs over the
+public internet, so it is slower than in-region GCP but still minutes for ~6 GB. The W&B
+key reaches the vendor through the environment and a private netrc; see commit
+`a78c7c7` for why.
 
-It must end with `Bootstrap complete`.
+It must end with `Bootstrap complete`. Look for `gcloud : service-account key
+activated` and `gcs access: checkpoint and /val readable, billed to <project>`.
+**Keep its check at `:329-344`:** the checkpoint directory must contain an integer-named
+step directory, or orbax reports "No checkpoints found", which reads like a missing
+checkpoint rather than a wrong path.
 
 **If it stops:**
-- **At the GCS check:** wrong project, wrong region, or missing storage scope on the
-  instance. Fix and re-run.
-- **At the JAX-on-GPU step:** **delete the instance.**
+- **At the GCS check:** the key, the project ID or Jaykay's role binding is wrong. Ask
+  him to rerun the test lines he used before sending the key. Fix, then re-run.
+- **At the JAX-on-GPU step (Step 3):** **delete the node.**
 - **Anywhere else:** fix and re-run. Every step resumes.
+
+`WANDB_KEY` and `GCP_BILLING_PROJECT` live only in this shell. C1 and C1b need them, so
+run those in the same tmux window, or export them again first.
 
 ### B4. Fingerprint before trusting the weights
 
@@ -407,10 +457,18 @@ cp $T/tokens-manifest.json $R/
 tar czf ~/001-results.tgz -C "$(dirname $R)" results
 ```
 
-Then **on the laptop**:
+The 000 results, also on the box, are only the scrubbed session folders and the
+checkpoint fingerprint:
 
 ```bash
-gcloud compute scp --zone <zone> <instance>:~/001-results.tgz .
+cd ~/TTT/experiments/000-repro-baseline/results && tar czf ~/000-results.tgz session-* checkpoint-sha256-*.txt
+```
+
+Then **on the laptop**, in PowerShell from the repo root:
+
+```powershell
+scp root@<IP>:~/000-results.tgz root@<IP>:~/001-results.tgz .
+tar xzf 000-results.tgz -C experiments/000-repro-baseline/results/
 tar xzf 001-results.tgz -C experiments/001-attack-spike/
 ```
 
@@ -419,8 +477,13 @@ deleted or broken instance takes everything not yet copied with it. Open `report
 `gate/gate.md` **on the laptop** before deleting the instance: a copy you have not opened
 is not a copy. Both copies must happen **before the instance is deleted**.
 
-**Delete the instance.** Stopping is not enough — a stopped instance still bills for its
-disk.
+**Delete the node:** MyAccount → Nodes → the node → Actions → Delete. **Powering off is
+not enough**: E2E keeps billing a powered-off node, because its disk, CPU, RAM and IP stay
+reserved. Refresh the node list and confirm it is gone.
+
+**Then tell Jaykay to delete the service account.** That also kills the key:
+`gcloud iam service-accounts delete ttt-data-reader@<project>.iam.gserviceaccount.com`.
+Delete `sa-key.json` from the laptop too.
 
 Then update:
 - `ORIENTATION.md` §9's status table and the spend figure;
@@ -433,10 +496,10 @@ Then update:
 
 ## Stop rules, decided in advance
 
-- **A100 quota not granted:** the session does not happen. Do not improvise onto a smaller
-  card; `PREREGISTERED.md`'s frozen Setup names A100/H100 80GB, and deviating is itself a
-  documented deviation.
-- **`nvidia-smi` shows CUDA < 12.8, or JAX cannot use the GPU:** delete the instance within
+- **No A100 80GB node available on E2E:** wait, or try the other location. Do not
+  improvise onto a 40 GB or another card: `PREREGISTERED.md`'s frozen Setup names A100/H100
+  80GB, and deviating is itself a documented deviation. An H100 80GB is in spec.
+- **`nvidia-smi` shows CUDA < 12.8, or JAX cannot use the GPU:** delete the node within
   30 minutes.
 - **000 returns FAIL:** stop. Nothing downstream is attributable.
 - **The session passes its deadline without a verdict:** copy out what exists, delete the
