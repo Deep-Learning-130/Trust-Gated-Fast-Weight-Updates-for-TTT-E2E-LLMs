@@ -1,43 +1,66 @@
-# GPU booking record
-
-> The queue. Rules: [`gpu-queue.md`](gpu-queue.md). Append in chronological order.
-> Claim the row **before** the instance starts; fill in Outcome on release.
-> A row with no task ID, no owner or no estimate is not a booking.
-
-**No box has been provisioned. No booking has been made. Nothing has been spent.**
-
-| # | Start (UTC) | End (UTC) | Owner | Task | Est. h | Actual h | Budget | Outcome |
-|---|---|---|---|---|---|---|---|---|
-| — | — | — | — | — | — | — | — | *(no bookings yet)* |
-
-## Expected first entries
-
-Not bookings. This is a plan, recorded so the first claim is quick to make. **Revised 2026-09-16 (second pass):**
-the provider is **E2E Networks** (UPI; Jarvislabs takes cards only, see `COST_MODEL.md` §9.3), and
-the session is driven by `scripts/run_gpu_session.sh` per `gpu-session-1-runbook.md`.
-
-| Task | Owner | Est. h | Budget | Notes |
-|---|---|---|---|---|
-| **Prerequisite, no GPU:** a teammate issues a service-account key on a billing-enabled GCP project; `gsutil du` with it prints 5347020507; W&B preflight passes | Manas + key holder | 0 | ~₹60–120 egress on the key holder's project | Manas cannot use Google Cloud himself (locked out). Jaykay's 2026-09-14 run was metadata only, so no files exist, and there is no non-Google mirror. |
-| `P0-1`/`T1.4` provision, gcloud login, `bootstrap_gpu_box.sh` (download + env), smoke pass | Manas | 1.0 | ~₹220 | Access is checked in seconds before anything slow; a bad GPU image is caught at Step 3. |
-| `T1.5`/`T1.6` baseline eval, 1B Books @8K, **50M tokens**, ×2 for bar S2 | Manas | 1.5 | ~₹330 | Each run recompiles; ~20–25 min per pass on an A100 (`TOLERANCE.md` §8, second note). |
-| `T1.7` negative control, acceptance, redacted copy-out, destroy box | Manas | 0.5 | ~₹110 | `check_baseline_acceptance.py` prints the verdict; read the bar first. |
+# GPU booking record
 
-Nominal total ≈ **3 h on an E2E A100 80 GB at $2.10/h ≈ ₹650 including GST** (bad day 4 h ≈ ₹870).
-Rates checked on e2enetworks.com on 2026-09-16; record the rate actually charged in the booking row.
-The Phase 0.5 cap stays at **$325**.
 
-**Superseded 2026-09-16:** the first revision planned this on JarvisLabs (card-only, unusable)
-with a gcloud login on the box. The earlier plan before that was two sessions totalling ≈6.5 h, with a 125M rehearsal first.
-
-## Claiming row #1
-
-Copy this into the table above and fill the blanks **before** the instance starts. It is not
-a claim until Start, Owner and Est. h are real.
-
-```
-| 1 | YYYY-MM-DDTHH:MMZ | — | <name> | P0-1/T1.4-T1.7 | 4 | — | ₹1,020 | *(in progress)* |
-```
-
-On release, replace the Outcome with what ran, what it produced, what broke and how far it
-got, and anything the next holder must know. The box is not free until that is written.
+
+> The queue. Rules: [`gpu-queue.md`](gpu-queue.md). Append in chronological order.
+
+> Claim the row **before** the instance starts; fill in Outcome on release.
+
+> A row with no task ID, no owner or no estimate is not a booking.
+
+
+
+**No box has been provisioned. No booking has been made. Nothing has been spent.**
+
+
+
+| # | Start (UTC) | End (UTC) | Owner | Task | Est. h | Actual h | Budget | Outcome |
+
+|---|---|---|---|---|---|---|---|---|
+
+| — | — | — | — | — | — | — | — | *(no bookings yet)* |
+
+
+
+## Expected first entries
+
+Not bookings. This is a plan, recorded so the first claim is quick to make. **Revised 2026-09-21:**
+the session runs on **GCP, inside Jaykay's project** (A100 80GB quota granted), one-and-done
+through the 001 verdict and the Phase 2 gate. It is operated by Jaykay from
+`gpu-session-1-runbook.md` and the shared "Session 1 Field Protocol" page, with Manas remote.
+
+| Task | Owner | Est. h | Budget | Notes |
+|---|---|---|---|---|
+| Create `a2-ultragpu-1g`, bootstrap (download + env), fingerprint | Jaykay | 0.8 | GCP credit | Step 3 catches a bad GPU image; stop rule is delete within 30 min. |
+| `T1.5`-`T1.7` 000 baseline (smoke, 2 runs for S2, control, acceptance) | Jaykay | 1.5 | GCP credit | `run_gpu_session.sh`, `DEADLINE_HOURS=2.5`. A FAIL stops the session. |
+| C1b prepare + C2 timing | Jaykay | 0.5 | GCP credit | C2 sets `--max-iters` for C3; agree it with Manas. |
+| C3 001 spike, C5 gate, C4 sequence (if time) | Jaykay | 3-4 | GCP credit | Crash-safe: rerun the same command to resume. Copy out after C3. |
+
+Nominal total ≈ **6-7 h at ~$4-5/h ≈ $25-35 of GCP credit**; the console's estimate and the bill
+are the real numbers. Record the rate actually charged in the booking row.
+
+**Superseded 2026-09-21:** the 2026-09-16 plan (E2E Networks over UPI, with a teammate's
+service-account key for the GCS download). Both constraints behind it are gone.
+
+## Claiming row #1
+
+
+
+Copy this into the table above and fill the blanks **before** the instance starts. It is not
+
+a claim until Start, Owner and Est. h are real.
+
+
+
+```
+
+| 1 | YYYY-MM-DDTHH:MMZ | — | Jaykay (box), Manas (remote) | T1.4-T1.7 + 001 C2-C5 | 7 | — | GCP credit (~$35) | *(in progress)* |
+
+```
+
+
+
+On release, replace the Outcome with what ran, what it produced, what broke and how far it
+
+got, and anything the next holder must know. The box is not free until that is written.
+
