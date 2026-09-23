@@ -1,5 +1,22 @@
 # GPU session 1: runbook
 
+> **Revised 2026-09-22: 125M, on the laptop. Read this first.** No 80 GB card is
+> affordable (the GCP quota was refused, E2E TIR holds ~24 h of credit up front, and
+> payment is UPI-only). The session runs on **`125m_ttt_e2e_finetune_books_8k_1x_cc`** on
+> Manas's **RTX 3070 Ti Laptop (8 GB) under WSL2**. `PREREGISTERED.md`'s revision
+> 2026-09-22 records this and moves no bar. **A STOP at 125M ends the project.**
+> - **Use Part B-local** instead of Part B, or **Part B-kaggle** (a free 16 GB GPU) if the
+>   laptop runs out of memory. Parts C and D are unchanged: every command takes `$SIZE`,
+>   `$CKPT` and `$DTYPE_FLAG` from the env files.
+> - **Data comes by Drive, not by key.** Someone with a billing-enabled GCP project runs
+>   `scripts/colab/fetch_checkpoint_colab.ipynb` under their own login. No
+>   service-account key is involved.
+> - **000 at 125M is S1–S4 only** (`TOLERANCE.md` §6, no numeric bar). It is not a
+>   reproduction.
+> - Memory estimates: `COST_MODEL.md` §9.4.2. Compute is free, egress is about ₹15.
+>
+> The E2E, GCP and cost-plan text below describes the 1B plan, which is deferred.
+
 > **Revised 2026-09-21 (evening): E2E Networks, Manas operating.** Jaykay's A100 quota
 > request was refused on submission, so the GPU is rented from **E2E Networks** (₹189/h
 > + GST, paid by UPI). The data still comes from Google Cloud: both buckets are
@@ -107,7 +124,7 @@ the part worth keeping.
 PYTHONPATH=src JAX_PLATFORMS=cpu .venv/Scripts/python.exe -m pytest
 ```
 
-As of 2026-09-21: **510 passed** with the reference model fetched (the laptop). Without it
+As of 2026-09-22: **521 passed** with the reference model fetched (the laptop). Without it
 the fluency tests skip, which is what CI sees. Quote both, per `branch-and-review.md` item 2, and update
 that line if the counts change. **Use `.venv/Scripts/python.exe`** — the system interpreter
 has no `equinox` and every test errors at collection.
@@ -258,13 +275,119 @@ The bootstrap already fingerprinted the checkpoint (its Step 4). **Do not run
 manifest instead:
 
 ```bash
-grep manifest_sha256 experiments/000-repro-baseline/results/checkpoint-sha256-1b_ttt_e2e_finetune_books_8k_1x_cc.txt
+source ~/ttt-runs/bootstrap/session.env    # defines $CKPT
+grep manifest_sha256 experiments/000-repro-baseline/results/checkpoint-sha256-$CKPT.txt
 ```
 
 That must print one line with a 64-hex-digit hash. `phase1.env` passes that file to every
 later run as `--checkpoint-manifest $CKPT_MANIFEST`. Without
 it the report records the run as `UNFINGERPRINTED`, which is honest but weaker: a bare path
 names a directory that may have changed, and the hash names the bytes.
+
+---
+
+## Part B-local: on the laptop, under WSL2 (125M, free)
+
+Replaces Part B for the 125M session. There is no billing clock, so an OOM or a crash
+costs only time. Every step still resumes.
+
+### BL0. Files in hand (from the Colab notebook)
+
+Someone with a billing-enabled GCP project runs `scripts/colab/fetch_checkpoint_colab.ipynb`
+under their own Google login (for now, Jaykay). The notebook leaves these in their
+`MyDrive/ttt/`:
+- `ttt-handoff-125m_ttt_e2e_finetune_books_8k_1x_cc.tar`: the checkpoint and sha256 manifest
+- `ttt-books3-val.tar`: the `/val` subset and `/train` chunk 0
+
+Download both to the laptop. **Do not create or accept a service-account key.** The old
+`ttt-data-reader` key was exposed and must be deleted, not reused.
+
+### BL1. WSL2 setup (once)
+
+In PowerShell, give WSL enough RAM (the default is half of 15 GB), then restart it:
+
+```powershell
+Set-Content -Path $HOME\.wslconfig -Value "[wsl2]`nmemory=12GB`nswap=8GB"
+wsl --shutdown
+wsl
+```
+
+Inside Ubuntu:
+
+```bash
+sudo apt-get update -y && sudo apt-get install -y git tmux python3
+nvidia-smi                          # must show the RTX 3070 Ti; the Windows driver provides it
+tmux new -s ttt
+cd ~ && git clone --recursive https://github.com/Manas-Maahir/Trust-Gated-Fast-Weight-Updates-for-TTT-E2E-LLMs.git TTT
+cd TTT && git checkout infra/gpu-session-1
+```
+
+**Clone into the Linux filesystem (`~`), not `/mnt/c`.** I/O across the Windows mount is
+several times slower, and the zarr reads and XLA cache would feel it.
+
+### BL2. Unpack
+
+```bash
+mkdir -p ~/ttt-data
+tar -xf /mnt/c/Users/manas/Downloads/ttt-handoff-125m_ttt_e2e_finetune_books_8k_1x_cc.tar -C ~/ttt-data
+tar -xf /mnt/c/Users/manas/Downloads/ttt-books3-val.tar -C ~/ttt-data   # llama3-books3/ and train-zarr/
+```
+
+### BL3. Bootstrap
+
+```bash
+export WANDB_ENTITY=manasmaahir27-vellore-institute-of-technology WANDB_PROJECT=ttt-trustgate-session1
+read -rs -p "W&B key: " WANDB_KEY; echo; export WANDB_KEY
+C=125m_ttt_e2e_finetune_books_8k_1x_cc
+LOCAL=1 DATA_ROOT=~/ttt-data \
+  CKPT_DIR=~/ttt-data/ttt-handoff/$C \
+  CKPT_SHA_MANIFEST=~/ttt-data/ttt-handoff/checkpoint-sha256-$C.txt \
+  bash scripts/bootstrap_gpu_box.sh
+```
+
+It must report `gcs : not needed -- checkpoint and val subset both on local disk`. Its
+Step 3 must show JAX running on the CUDA device. If JAX sees only the CPU, the WSL CUDA
+path is broken. Fix that before anything else; nothing downstream is worth running on CPU.
+
+`LOCAL=1` raises `XLA_PYTHON_CLIENT_MEM_FRACTION` to 0.92 in the generated eval scripts.
+JAX's default 75% pool is too small for the 125M eval on 8 GB. `COST_MODEL.md` §9.4.2 has
+the estimates: C1 about 7–9 GB (right at the limit), C2–C5 about 3–4 GB.
+
+Then run Part C. For C1b, use `export TRAIN_DIR=~/ttt-data/train-zarr` instead of a
+billing project. **Do not let the laptop sleep during a run.** Plug it in and set
+Windows' sleep to "never" for the session. C3–C5 resume after a crash, but a
+C1 run killed halfway has to start over.
+
+**If C1 still OOMs at eval batch 4** (the automatic retry), or anything later runs out of
+memory, move to Part B-kaggle and record the host in the session summary. The revision names
+the Kaggle GPU as the fallback, so that switch is not a deviation.
+
+---
+
+## Part B-kaggle: on a free Kaggle GPU (the fallback, and possibly the whole session)
+
+Use this if the laptop fails the memory tests, or runs out of memory at any step.
+Everything is in **`scripts/kaggle/ttt_session_kaggle.ipynb`**. Upload it to Kaggle
+(Create → Import Notebook) and read its first cell.
+
+1. **`MODE = "smoke"` first.** No data or checkpoint is needed. It runs experiment 003 at 8192
+   (falling back to 4096) and the random-init `--gate-eval` smoke, on a 16 GB T4 or P100.
+   `carry-is-non-trivial` must pass and the first-chunk loss must not be NaN.
+2. **Then `MODE = "session"`.** Put the two tars from the Colab fetch into a private Kaggle
+   Dataset, attach it, set `DATASET_DIR`, and add the W&B keys as Kaggle Secrets. Commit with
+   **Save & Run All**: it runs with the browser closed, for up to 12 hours.
+3. **C2 sets `MAX_ITERS`.** Leave `MAX_ITERS = None` for the first commit. C3 refuses to start
+   without it, so the first commit ends after C2. Read the C2 timing, set `MAX_ITERS`, attach
+   that commit's output, set `RESUME_FROM`, and commit again.
+
+**Two differences from the laptop, both recorded automatically:**
+- **`COMPUTE_DTYPE=fp32`.** T4 and P100 have no native bf16. The bootstrap bakes
+  `model.compute_dtype=fp32` into the 000 scripts and writes it to `session.env`, and
+  `run_gpu_session.sh` records it in the summary. Every C2–C5 command receives
+  `$DTYPE_FLAG` from `phase1.env`, and the CLI appends `[compute_dtype=fp32]` to the victim
+  label in every report. Poison and control share the dtype, so the comparison stays matched.
+- **Results live in `/kaggle/working/results`.** They are copied there after every step.
+  `/tmp`, which holds the repo, the vendor env and the data, is gone when the session ends.
 
 ---
 
@@ -280,13 +403,19 @@ DEADLINE_HOURS=2.5 bash scripts/run_gpu_session.sh
 measured afterwards is unattributable** — it might be our own misconfiguration. Do not
 proceed past a FAIL. Bar and structural checks are in the Acceptance table below.
 
+**At 125M there is no band.** `TOLERANCE.md` §6 gives 125M no numeric bar, so
+`check_baseline_acceptance.py --checkpoint $CKPT` (which `run_gpu_session.sh` passes) scores
+S1–S4 only and reports the loss as INFO. A 125M PASS shows the harness works on real
+weights. **It is not a reproduction**, and the verdict line says so.
+
 ### C1b. Prepare for 001 and the gate (after 000 PASS, ~10 min, no verdict)
 
 ```bash
 git pull                                   # the gate wiring may have landed during 000
 export GCP_BILLING_PROJECT=<project>       # same shell as the bootstrap
+#   locally (Part B-local): instead, export TRAIN_DIR=~/ttt-data/train-zarr  -- no billing project
 bash scripts/prepare_phase1.sh
-source "${EXP_DIR:-$HOME/ttt-runs}/phase1.env"   # defines $TG $T $R $EXP_DIR $CKPT_DEST $CKPT_MANIFEST
+source "${EXP_DIR:-$HOME/ttt-runs}/phase1.env"   # defines $TG $T $R $SIZE $EXP_DIR $CKPT_DEST $CKPT_MANIFEST
 ```
 
 **Before this, no interpreter on the box could run the checkpoint CLI.** `trustgate`
@@ -329,7 +458,7 @@ seed's search) and, on a null, `NULL-RESULT.md`. Every command below tees its ou
 time $TG --objective degrade --strategy select \
   --checkpoint $CKPT_DEST --checkpoint-manifest $CKPT_MANIFEST \
   --corpus-file $T/train.npy --eval-file $T/val.npy \
-  --size 1b --seq-length 8192 --stream-tokens 8192 \
+  --size $SIZE $DTYPE_FLAG --seq-length 8192 --stream-tokens 8192 \
   --seeds 0 1 --max-iters 1 --early-stop-patience 0 --no-resume \
   --out $EXP_DIR/c2-timing 2>&1 | tee -a $R/logs/c2-timing.log
 ```
@@ -355,7 +484,7 @@ $TG --objective degrade --strategy select \
   --checkpoint $CKPT_DEST --checkpoint-manifest $CKPT_MANIFEST \
   --corpus-file $T/train.npy --eval-file $T/val.npy \
   --corpus-split train --eval-split val \
-  --size 1b --seq-length 8192 --stream-tokens 8192 \
+  --size $SIZE $DTYPE_FLAG --seq-length 8192 --stream-tokens 8192 \
   --seeds 0 1 2 3 4 --max-iters <measured> \
   --out $R 2>&1 | tee -a $R/logs/c3-spike.log
 ```
@@ -381,7 +510,7 @@ $TG --objective degrade --strategy select --sequence-eval \
   --checkpoint $CKPT_DEST --checkpoint-manifest $CKPT_MANIFEST \
   --corpus-file $T/train.npy --eval-file $T/val.npy \
   --arms-file $R/arms.pkl \
-  --size 1b --seq-length 8192 --seeds 0 1 2 3 4 \
+  --size $SIZE $DTYPE_FLAG --seq-length 8192 --seeds 0 1 2 3 4 \
   --out $R/sequence 2>&1 | tee -a $R/logs/c4-sequence.log
 ```
 
@@ -402,7 +531,7 @@ $TG --objective degrade --strategy select --gate-eval \
   --checkpoint $CKPT_DEST --checkpoint-manifest $CKPT_MANIFEST \
   --corpus-file $T/train.npy --eval-file $T/val.npy --probe-file $T/probe.npy \
   --arms-file $R/arms.pkl \
-  --size 1b --seq-length 8192 --seeds 0 1 2 3 4 \
+  --size $SIZE $DTYPE_FLAG --seq-length 8192 --seeds 0 1 2 3 4 \
   --gate-quantiles 0.9 0.99 \
   --out $R/gate 2>&1 | tee -a $R/logs/c5-gate.log
 ```

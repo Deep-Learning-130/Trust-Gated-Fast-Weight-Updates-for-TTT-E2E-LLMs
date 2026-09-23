@@ -23,6 +23,17 @@ Two readings are made explicit here rather than left to whoever runs it:
   at all; otherwise it reports the value next to the 10-12 reference for a human
   to read. It does not invent a cut-off.
 
+Per checkpoint (``--checkpoint``, default the 1B so an unlabelled run meets the
+strictest bar):
+
+* ``1b_ttt_e2e_finetune_books_8k_1x_cc`` -- everything above.
+* ``125m_ttt_e2e_finetune_books_8k_1x_cc`` -- TOLERANCE.md s6: **no numeric bar**,
+  and PREREGISTERED.md's 2026-09-22 revision makes S1-S4 the whole gate. The band
+  and s4.3 are 1B numbers, so the band is reported as INFO and s4.3 is dropped.
+  S3 has no band to sit above, so it reads "above the model's own real-data
+  loss" -- the weakest cut-off that still catches a control that did not run on
+  random tokens. A PASS here is not a reproduction, and the verdict says so.
+
 Layout expected under --collected (what run_gpu_session.sh produces):
 
     logs/eval-1.log  logs/eval-2.log  logs/control.log  logs/smoke.log
@@ -42,6 +53,9 @@ from pathlib import Path
 BAND_LOW, BAND_HIGH = 2.314, 2.805
 EXPECT_LOW, EXPECT_HIGH = 2.60, 2.70
 S2_TOLERANCE = 5e-5
+CKPT_1B = "1b_ttt_e2e_finetune_books_8k_1x_cc"
+CKPT_125M = "125m_ttt_e2e_finetune_books_8k_1x_cc"
+KNOWN_CHECKPOINTS = (CKPT_1B, CKPT_125M)
 CONTROL_REFERENCE = "order 10-12 nats (TOLERANCE.md s5; uniform over 128256 tokens = 11.762)"
 
 LOSS_LINE = re.compile(r"Eval -- train_holdout/loss:\s*(?P<v>[-+]?(?:\d+\.?\d*(?:[eE][-+]?\d+)?|nan|inf))")
@@ -78,13 +92,19 @@ def s1_means(npy_path: Path) -> tuple[float, float]:
     return early, late
 
 
-def evaluate(collected: Path) -> list[tuple[str, str, str]]:
+def evaluate(collected: Path, checkpoint: str = CKPT_1B) -> list[tuple[str, str, str]]:
+    if checkpoint not in KNOWN_CHECKPOINTS:
+        raise SystemExit(f"no TOLERANCE.md bars are wired for checkpoint {checkpoint!r}; known: {KNOWN_CHECKPOINTS}")
+    has_band = checkpoint == CKPT_1B
     rows: list[tuple[str, str, str]] = []
     eval1, eval2, control = (read_log(collected, n) for n in ("eval-1", "eval-2", "control"))
     l1, l2, lc = loss_of(eval1), loss_of(eval2), loss_of(control)
 
     # Band
-    if l1 is None:
+    if not has_band:
+        rows.append(("Band", INFO, (f"{l1:.6f} nats/token; " if l1 is not None and math.isfinite(l1) else "")
+                     + "no numeric bar for this checkpoint (TOLERANCE.md s6)"))
+    elif l1 is None:
         rows.append(("Band", UNVERIFIED, "no 'Eval -- train_holdout/loss' in logs/eval-1.log"))
     elif not math.isfinite(l1):
         rows.append(("Band", FAIL, f"loss is {l1}"))
@@ -118,6 +138,14 @@ def evaluate(collected: Path) -> list[tuple[str, str, str]]:
     # S3
     if lc is None:
         rows.append(("S3 negative control", UNVERIFIED, "no loss in logs/control.log"))
+    elif not has_band:
+        if l1 is None or not math.isfinite(l1):
+            rows.append(("S3 negative control", UNVERIFIED, "no band here, and no finite eval-1 loss to compare against"))
+        elif not (math.isfinite(lc) and lc > l1):
+            rows.append(("S3 negative control", FAIL, f"control loss {lc} is not above the real-data loss {l1}"))
+        else:
+            rows.append(("S3 negative control", PASS,
+                         f"control loss {lc:.4f} is above the real-data loss {l1:.4f}; read it against {CONTROL_REFERENCE}"))
     elif not (math.isfinite(lc) and lc > BAND_HIGH):
         rows.append(("S3 negative control", FAIL, f"control loss {lc} is not above the band (> {BAND_HIGH})"))
     else:
@@ -148,8 +176,8 @@ def evaluate(collected: Path) -> list[tuple[str, str, str]]:
         rows.append(("S4 gate absent", FAIL if hits else PASS,
                      f"'trustgate' found in: {hits}" if hits else f"no 'trustgate' in {sorted(all_logs)}"))
 
-    # s4.3, non-binding
-    if l1 is not None and math.isfinite(l1):
+    # s4.3, non-binding, and a 1B expectation only
+    if has_band and l1 is not None and math.isfinite(l1):
         inside = EXPECT_LOW <= l1 <= EXPECT_HIGH
         rows.append(("s4.3 expectation", INFO,
                      f"{l1:.4f} {'inside' if inside else 'OUTSIDE'} {EXPECT_LOW}-{EXPECT_HIGH} (non-binding"
@@ -158,13 +186,17 @@ def evaluate(collected: Path) -> list[tuple[str, str, str]]:
     return rows
 
 
-def verdict(rows: list[tuple[str, str, str]]) -> tuple[str, int]:
+def verdict(rows: list[tuple[str, str, str]], checkpoint: str = CKPT_1B) -> tuple[str, int]:
     statuses = [s for _, s, _ in rows if s != INFO]
     if FAIL in statuses:
-        return "FAIL -- stop. Nothing downstream is attributable (TOLERANCE.md s4.1).", 1
+        cite = "s4.1" if checkpoint == CKPT_1B else "s5"
+        return f"FAIL -- stop. Nothing downstream is attributable (TOLERANCE.md {cite}).", 1
     if UNVERIFIED in statuses:
         missing = [n for n, s, _ in rows if s == UNVERIFIED]
         return f"NOT YET PASS -- unverified: {', '.join(missing)}. Record each gap in the Outcome.", 2
+    if checkpoint != CKPT_1B:
+        return ("PASS -- S1-S4 (TOLERANCE.md s5) met. This checkpoint has no numeric bar (s6): "
+                "the harness works on real weights; this is not a reproduction."), 0
     return "PASS -- all bars in TOLERANCE.md s4.1 and s5 met.", 0
 
 
@@ -172,12 +204,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Score a baseline session against TOLERANCE.md.")
     parser.add_argument("--collected", type=Path, required=True)
     parser.add_argument("--out", type=Path, help="also write the report here")
+    parser.add_argument("--checkpoint", default=CKPT_1B,
+                        help=f"which checkpoint's bars to apply (default {CKPT_1B}, the strictest)")
     args = parser.parse_args(argv)
 
-    rows = evaluate(args.collected)
-    text, code = verdict(rows)
+    rows = evaluate(args.collected, args.checkpoint)
+    text, code = verdict(rows, args.checkpoint)
     width = max(len(n) for n, _, _ in rows)
-    lines = ["Baseline acceptance -- experiments/000-repro-baseline/TOLERANCE.md", ""]
+    lines = ["Baseline acceptance -- experiments/000-repro-baseline/TOLERANCE.md", f"checkpoint: {args.checkpoint}", ""]
     lines += [f"  {n:<{width}}  {s:<10}  {d}" for n, s, d in rows]
     lines += ["", f"VERDICT: {text}"]
     report = "\n".join(lines) + "\n"

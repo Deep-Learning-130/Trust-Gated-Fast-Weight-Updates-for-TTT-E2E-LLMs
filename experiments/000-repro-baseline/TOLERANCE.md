@@ -355,3 +355,17 @@ size.
 50M tokens covers fewer books, so if `/val` is ordered by source the subset is less
 representative. The 4.3 expectation is weaker evidence still. None of this touches a bar.
 
+
+### 2026-09-22 — session 1 runs on 125M, so the gate is S1–S4 only
+
+**Written before the run, before any number exists.** See
+`experiments/001-attack-spike/PREREGISTERED.md`, revision 2026-09-22 (Manas Maahir).
+
+The session's target moves from the 1B checkpoint to `125m_ttt_e2e_finetune_books_8k_1x_cc`,
+run locally on an 8 GB RTX 3070 Ti. Section 6 already says what that means here: **no numeric
+bar.** Section 4.1's band is a 1B band and does not apply to 125M. The C1 gate for this session
+is the structural bars S1–S4 in section 5, and nothing more.
+
+**What a 125M PASS establishes:** the harness, the checkpoint restore and the eval path work
+on real released weights. **What it does not establish:** that we reproduce the paper. Nobody
+should quote it as a reproduction. Section 4 stays as the plan of record for a future 1B run.

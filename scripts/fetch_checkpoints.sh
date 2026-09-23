@@ -6,7 +6,7 @@
 # anything, and refuses to exceed MAX_BYTES without an explicit override.
 #
 # Checkpoint layout is FLAT NAMED DIRECTORIES, not ${BUCKET}/${SIZE}:
-#   gs://ttt-e2e-checkpoints/1b_ttt_e2e_finetune_books_8k_1x_cc
+#   gs://ttt-e2e-checkpoints/125m_ttt_e2e_finetune_books_8k_1x_cc
 # See vendor/ttt-e2e/README.md "Model Checkpoints".
 #
 # NOT YET VERIFIED AGAINST THE LIVE BUCKET. Every path here is transcribed from
@@ -27,14 +27,14 @@ set -euo pipefail
 
 BUCKET="${BUCKET:-gs://ttt-e2e-checkpoints}"
 
-# Plan of record: the 1B DCLM-pretrained, Books-extension checkpoint at 8K.
-# ADR-004 fixes this as the baseline target; ADR-005 records why, and what the
-# alternatives cost. Other released names (vendor README):
+# Plan of record since 2026-09-22: the 125M DCLM-pretrained, Books-extension
+# checkpoint at 8K (PREREGISTERED.md revision 2026-09-22 -- no 80 GB card is
+# affordable). ADR-004/005 chose 1B and still describe the 1B run. Other released names (vendor README):
 #   125m_ttt_e2e_pretrain_dclm_8k_1x_cc     1b_ttt_e2e_pretrain_dclm_8k_1x_cc
 #   3b_ttt_e2e_pretrain_dclm_8k_3x_cc       125m_ttt_e2e_finetune_books_8k_1x_cc
 #   1b_ttt_e2e_finetune_books_8k_1x_cc      3b_ttt_e2e_finetune_books_8k_3x_cc
 #   3b_ttt_e2e_finetune_books_128k_3x_cc
-CKPT="${CKPT:-1b_ttt_e2e_finetune_books_8k_1x_cc}"
+CKPT="${CKPT:-125m_ttt_e2e_finetune_books_8k_1x_cc}"
 
 SRC="${BUCKET}/${CKPT}"
 DEST="${DEST:-checkpoints/${CKPT}}"          # checkpoints/ is git-ignored

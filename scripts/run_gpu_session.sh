@@ -61,6 +61,7 @@ session_start="$(date +%s)"
 record "# GPU session summary"
 record "started_utc:   $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 record "checkpoint:    $CKPT"
+record "compute_dtype: ${COMPUTE_DTYPE:-vendor default (bf16)}"
 record "val_tokens:    $VAL_TOKENS"
 record "deadline_h:    $DEADLINE_HOURS"
 record "overlay_sha:   $(git -C "$repo_root" rev-parse HEAD)"
@@ -208,7 +209,7 @@ set +e
 # The vendor env, because S1 reads the .npy and the system python3 may lack numpy.
 # That env has no trustgate package at all, which is itself part of S4.
 ( cd "$repo_root/vendor/ttt-e2e" && uv run --exact python "$repo_root/scripts/check_baseline_acceptance.py" \
-    --collected "$DEST" --out "$DEST/ACCEPTANCE.txt" )
+    --collected "$DEST" --checkpoint "$CKPT" --out "$DEST/ACCEPTANCE.txt" )
 verdict=$?
 set -e
 

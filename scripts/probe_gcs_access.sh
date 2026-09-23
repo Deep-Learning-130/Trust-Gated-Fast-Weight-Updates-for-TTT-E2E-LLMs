@@ -23,8 +23,8 @@ set -uo pipefail
 
 # ---------------------------------------------------------------- constants --
 CKPT_BUCKET="gs://ttt-e2e-checkpoints"
-CKPT_1B="1b_ttt_e2e_finetune_books_8k_1x_cc"     # ADR-004/005: the baseline target
-CKPT_125M="125m_ttt_e2e_finetune_books_8k_1x_cc" # the cheap rehearsal alternative
+CKPT_1B="1b_ttt_e2e_finetune_books_8k_1x_cc"     # ADR-004/005: the 1B target, deferred
+CKPT_125M="125m_ttt_e2e_finetune_books_8k_1x_cc" # the session target (PREREGISTERED.md 2026-09-22)
 DATA_BUCKET="gs://llama3-books3"
 
 # COST_MODEL.md 2.2: int32 token ids, Blosc/zstd, assume ~2.5x => ~1.6 B stored
@@ -111,9 +111,9 @@ probe_size() {  # <label> <path> <key>
 }
 
 say "1. Checkpoints"
-probe_size "1B books@8K (the target)" "$CKPT_BUCKET/$CKPT_1B" "ckpt_1b"
+probe_size "1B books@8K (deferred)" "$CKPT_BUCKET/$CKPT_1B" "ckpt_1b"
 CKPT_1B_BYTES="$PROBE_BYTES"
-probe_size "125M books@8K (rehearsal)" "$CKPT_BUCKET/$CKPT_125M" "ckpt_125m"
+probe_size "125M books@8K (the target)" "$CKPT_BUCKET/$CKPT_125M" "ckpt_125m"
 CKPT_125M_BYTES="$PROBE_BYTES"
 say ""
 

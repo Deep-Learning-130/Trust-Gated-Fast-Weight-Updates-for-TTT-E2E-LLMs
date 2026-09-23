@@ -36,6 +36,10 @@ import sys
 import tempfile
 
 EXP_NAMES = (
+    # 125M first: the session target since PREREGISTERED.md revision 2026-09-22.
+    "smoke-125m_ttt_e2e_finetune_books_8k_1x_cc",
+    "eval-125m_ttt_e2e_finetune_books_8k_1x_cc",
+    "dummy-125m_ttt_e2e_finetune_books_8k_1x_cc",
     "smoke-1b_ttt_e2e_finetune_books_8k_1x_cc",
     "eval-1b_ttt_e2e_finetune_books_8k_1x_cc",
     "dummy-1b_ttt_e2e_finetune_books_8k_1x_cc",

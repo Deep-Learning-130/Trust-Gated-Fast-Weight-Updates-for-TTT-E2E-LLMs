@@ -4,7 +4,8 @@
 #   uv installed if the image lacks it
 #   the NVIDIA driver checked, and JAX proven to see and run on the GPU
 #   vendor submodule at the pinned SHA, vendor environment installed
-#   1B checkpoint on local disk and sha256-fingerprinted (or verified)
+#   the checkpoint (default 125M, PREREGISTERED.md revision 2026-09-22) on local
+#   disk and sha256-fingerprinted (or verified)
 #   a TRUNCATED books3 /val on local disk, with a manifest recording what was cut
 #   training.exp_dir created OUTSIDE this repo
 #   three eval commands written out -- smoke, baseline, negative control --
@@ -30,7 +31,9 @@
 # Useful overrides:
 #   VAL_TOKENS=50000000                         # eval length; THE wall-clock knob (TOLERANCE s8)
 #   SMOKE_TOKENS=131073                         # 16 sequences = 2 eval batches
-#   CKPT=125m_ttt_e2e_finetune_books_8k_1x_cc   # +experiment= follows this automatically
+#   CKPT=1b_ttt_e2e_finetune_books_8k_1x_cc     # +experiment= follows this automatically
+#   LOCAL=1                                     # own machine under WSL2, not a rented box (runbook Part B-local)
+#   COMPUTE_DTYPE=fp32                          # Turing cards (Kaggle/Colab T4): no native bf16 (runbook Part B-kaggle)
 #   CKPT_DIR=/mnt/data/<ckpt>                   # where the checkpoint lives (default: repo checkpoints/)
 #   CKPT_SHA_MANIFEST=path                      # verify a side-loaded checkpoint against this manifest
 #   GCP_BILLING_PROJECT=...                     # only needed if data must be fetched from GCS
@@ -41,7 +44,11 @@
 #   ALLOW_CKPT_LAYOUT=1                         # accept a checkpoint without an orbax step dir
 set -euo pipefail
 
-CKPT="${CKPT:-1b_ttt_e2e_finetune_books_8k_1x_cc}"
+# 125M since PREREGISTERED.md revision 2026-09-22: no 80 GB card is affordable, and
+# the session runs on an 8 GB laptop GPU. 1B stays one override away.
+CKPT="${CKPT:-125m_ttt_e2e_finetune_books_8k_1x_cc}"
+LOCAL="${LOCAL:-0}"
+COMPUTE_DTYPE="${COMPUTE_DTYPE:-}"       # fp32 on a T4 (Kaggle, Colab free); empty = vendor default bf16
 BUCKET="${BUCKET:-gs://ttt-e2e-checkpoints}"
 DATA_BUCKET="${DATA_BUCKET:-gs://llama3-books3}"
 PINNED_SHA="a4fc4788ace38e29b5067916d4f4be33da894085"
@@ -217,9 +224,15 @@ elif (( driver_major < 570 )); then
   echo "                compatibility, or may fail at the GPU check in Step 3. If Step 3 fails, release the box."
 fi
 mem_total_mib="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1 | tr -d ' ')"
-if [[ "$mem_total_mib" =~ ^[0-9]+$ ]] && (( mem_total_mib < 70000 )); then
-  echo "    WARNING   : ${mem_total_mib} MiB GPU memory. The 1B eval is estimated at 36-49 GB"
-  echo "                (COST_MODEL s9.4.1); an 80 GB card was the recommendation."
+# Size-aware: the per-chunk logits term scales with the 128,256 vocab, not with
+# model size, so 125M's eval is not 1/8 of 1B's (COST_MODEL s9.4.2).
+case "${CKPT%%_*}" in
+  125m) mem_need_mib=10000 mem_note="The 125M train.py eval is estimated at 7-9 GB at eval batch 4 and more at 8;
+                the trustgate CLI path (C2-C5) at 3-4 GB (COST_MODEL s9.4.2). OOM_RETRY drops C1 to batch 4." ;;
+  *)    mem_need_mib=70000 mem_note="The 1B eval is estimated at 36-49 GB (COST_MODEL s9.4.1); an 80 GB card was the recommendation." ;;
+esac
+if [[ "$mem_total_mib" =~ ^[0-9]+$ ]] && (( mem_total_mib < mem_need_mib )); then
+  echo "    WARNING   : ${mem_total_mib} MiB GPU memory. $mem_note"
 fi
 
 # Free space where the bytes actually go.
@@ -451,6 +464,10 @@ set -euo pipefail
 RUN_LOG="\${RUN_LOG:-$EXP_DIR/logs/$exp_name-\$(date -u +%Y%m%dT%H%M%SZ).log}"
 mkdir -p "\$(dirname "\$RUN_LOG")"
 export PYTHONUNBUFFERED=1
+# JAX preallocates 75% of the card by default. On an 8 GB card (LOCAL=1) that pool
+# is too small for the 125M eval, so the fraction is raised; a rented box keeps
+# JAX's default. Override per run by exporting it.
+export XLA_PYTHON_CLIENT_MEM_FRACTION="\${XLA_PYTHON_CLIENT_MEM_FRACTION:-$( [[ "$LOCAL" == "1" ]] && echo 0.92 || echo 0.75 )}"
 
 # The key goes in through the environment and a private netrc, and
 # training.wandb_key is passed EMPTY. wandb 0.19.9 (the vendor lock) raises
@@ -499,13 +516,26 @@ SMOKE_CMD="$EXP_DIR/bootstrap/1-smoke-${CKPT}.sh"
 REAL_CMD="$EXP_DIR/bootstrap/2-eval-${CKPT}.sh"
 CTRL_CMD="$EXP_DIR/bootstrap/3-dummy-control-${CKPT}.sh"
 
+# COMPUTE_DTYPE=fp32 on a Turing card (Kaggle/Colab T4 has no native bf16). Baked
+# into the generated scripts, not read at run time, so all three runs -- and the
+# two S2 runs especially -- are provably the same condition.
+DTYPE_OVERRIDE=""
+case "$COMPUTE_DTYPE" in
+  "") ;;
+  bf16|fp32) DTYPE_OVERRIDE="model.compute_dtype=$COMPUTE_DTYPE"
+             echo "    compute_dtype: $COMPUTE_DTYPE (override; recorded in session.env)" ;;
+  *) die "COMPUTE_DTYPE must be bf16 or fp32, got '$COMPUTE_DTYPE'" ;;
+esac
+
 write_eval_cmd "$SMOKE_CMD" "smoke-${CKPT}" \
-  "SMOKE PASS -- two eval batches. Shakes out the launch, measures memory. NOT a result."
+  "SMOKE PASS -- two eval batches. Shakes out the launch, measures memory. NOT a result." \
+  $DTYPE_OVERRIDE
 write_eval_cmd "$REAL_CMD" "eval-${CKPT}" \
-  "BASELINE EVAL for $CKPT. Run it TWICE unchanged -- TOLERANCE.md s5 bar S2 wants 4-decimal agreement."
+  "BASELINE EVAL for $CKPT. Run it TWICE unchanged -- TOLERANCE.md s5 bar S2 wants 4-decimal agreement." \
+  $DTYPE_OVERRIDE
 write_eval_cmd "$CTRL_CMD" "dummy-${CKPT}" \
   "NEGATIVE CONTROL (TOLERANCE.md s5 bar S3). Random tokens; the loss must land FAR ABOVE the band." \
-  "training.dummy_dataset=true"
+  "training.dummy_dataset=true" $DTYPE_OVERRIDE
 
 RESHAPE_SMOKE="$EXP_DIR/bootstrap/reshape-to-smoke.sh"
 RESHAPE_REAL="$EXP_DIR/bootstrap/reshape-to-real.sh"
@@ -532,6 +562,8 @@ BOOKS3_LOCAL=$BOOKS3_LOCAL
 VAL_TOKENS=$VAL_TOKENS
 SMOKE_TOKENS=$SMOKE_TOKENS
 CKPT_MANIFEST=$CKPT_MANIFEST
+LOCAL=$LOCAL
+COMPUTE_DTYPE=$COMPUTE_DTYPE
 EOF
 
 # ------------------------------------------------------------------- done ----

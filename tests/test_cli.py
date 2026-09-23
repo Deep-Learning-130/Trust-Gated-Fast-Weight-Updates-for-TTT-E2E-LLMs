@@ -334,3 +334,24 @@ def test_token_files_load_as_int32(tmp_path):
     loaded = cli._load_tokens(path, "--corpus-file")
     assert loaded.dtype.name == "int32"
     assert loaded.tolist() == list(range(16))
+
+
+# ------------------------------------------------------- compute dtype (T4) ---
+# Kaggle's and Colab's T4 is Turing and has no native bf16, so the vendor default
+# (`compute_dtype: bf16`, config.py:107) must be overridable. The default stays
+# None -- the vendor's own value -- so nothing changes unless it is asked for.
+
+
+def test_compute_dtype_defaults_to_the_vendor_value():
+    args = cli.build_parser().parse_args([*BASE, "--out", "/tmp/x"])
+    assert args.compute_dtype is None
+
+
+def test_compute_dtype_accepts_fp32_for_turing():
+    args = cli.build_parser().parse_args([*BASE, "--out", "/tmp/x", "--compute-dtype", "fp32"])
+    assert args.compute_dtype == "fp32"
+
+
+def test_compute_dtype_rejects_an_unknown_value():
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args([*BASE, "--out", "/tmp/x", "--compute-dtype", "fp16"])

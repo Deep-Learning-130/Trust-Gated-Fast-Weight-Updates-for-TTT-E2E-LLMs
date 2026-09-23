@@ -22,6 +22,15 @@
 
 
 
+## 2026-09-22: session 1 needs no booking
+
+Session 1 now runs on **125M on Manas's own laptop GPU** (RTX 3070 Ti, 8 GB, WSL2), per
+`PREREGISTERED.md`'s revision 2026-09-22 and `gpu-session-1-runbook.md` Part B-local.
+**Nothing is rented, so there is no row to claim, and the empty table above is correct.**
+The only spend is about ₹15 of GCS egress for the Colab fetch, billed to whoever runs it.
+If C1 falls back to the free Kaggle TPU, that isn't a booking either. The 1B plan below
+is deferred, not cancelled.
+
 ## Expected first entries
 
 Not bookings. This is a plan, recorded so the first claim is quick to make. **Revised 2026-09-21:**

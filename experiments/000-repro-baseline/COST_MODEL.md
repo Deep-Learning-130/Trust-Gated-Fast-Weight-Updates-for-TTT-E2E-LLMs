@@ -494,6 +494,57 @@ section with the measurement.
 `max()`: `training.global_batch_size=1 training.eval_batch_size=4` gives batch 4, halving the
 two ×8 terms. Record it — it changes the run condition, though not the quantity estimated.
 
+### 9.4.2 The 125M session on an 8 GB laptop card, 2026-09-22
+
+`PREREGISTERED.md`'s 2026-09-22 revision moves session 1 to
+`125m_ttt_e2e_finetune_books_8k_1x_cc`, run on the owner's RTX 3070 Ti Laptop GPU (8 GB, Ampere,
+native bf16) under WSL2. Compute cost is **₹0**. The one real risk is memory.
+
+The table below scales §9.4.1 to 125M (12 layers, hidden 768, but **the same 128,256 vocab**):
+
+| Term | 125M, `train.py` eval at batch 4 | 125M, trustgate CLI (one sequence) |
+|---|---|---|
+| Params, fp32 (tied embedding is ~98M of them) | ~0.75 GB | ~0.75 GB |
+| Outer AdamW state (`train.py:180`, never used) | ~1.5 GB | none |
+| Dtype-cast copy | 0–0.75 GB | 0–0.75 GB |
+| Per-chunk logits + fp32 log-softmax, `[b, 1024, 128256]` | **~5 GB** | ~1 GB |
+| Fast weights, prefix, remat'd activations | ~1 GB | ~0.5–1 GB |
+| **Total** | **≈ 7–9 GB** | **≈ 3–4 GB** |
+
+**The logits term does not shrink with the model.** It scales with vocab × chunk × batch, which
+is why 125M is not simply 1/8 of 1B. `train.py:211` floors the eval batch at
+`max(eval_batch_size, gbs*4)`, so batch 4 is the lowest the vendor path goes.
+
+- **C1** (vendor `train.py`) sits right at 8 GB. `OOM_RETRY` already drops it to batch 4, and
+  `LOCAL=1` raises `XLA_PYTHON_CLIENT_MEM_FRACTION` to 0.92. If batch 4 still OOMs, run C1 alone on
+  the free Kaggle GPU fallback (runbook Part B-kaggle, fp32 on a T4) and record the host.
+- **C2–C5** (`trustgate.eval.cli`, one sequence per `vendor_bind.make_batch`) should fit with
+  room to spare.
+- **1B locally: no.** Even §9.4's bf16 CLI-path figure (≈ 7.5 GB) leaves nothing for the search
+  or the gate.
+
+**Evidence against this estimate already exists.** On 2026-09-15, `experiments/003-smoke-125m`
+ran random-init 125M on this same laptop at `seq_length` **4096**. The run recorded in
+`results/smoke.json` (git-ignored, local only) hit `RESOURCE_EXHAUSTED` on `carry-is-non-trivial`
+(a 1.9 GB allocation) and on `determinism`. That run's first-chunk loss also came out NaN, even
+though an earlier run at runner `97bde01` produced a clean falling curve (commit `548c0c0`).
+So even the ~3–4 GB CLI-path figure is unproven at 8192. **Rerun 003 and the random-init
+`--gate-eval` smoke on the laptop before anyone fetches data**; both are free and need no checkpoint.
+
+**Still an estimate.** `run_gpu_session.sh` samples `nvidia-smi` every 5 s. Record the peak here
+after the smoke phase, the same way §9.4.1 asks.
+
+**Wall time.** Roughly the same as 1B on an A100, possibly 1.5× that: 125M is about 8× less
+compute, and the laptop card is about 10–15× slower. C2 measures it. C3–C5 resume after a crash,
+which covers laptop sleep and thermal throttling.
+
+**Egress** is the only money left: the 0.68 GB checkpoint plus the 0.4 GB `/val` chunk, about
+₹15, billed to whoever runs the Colab fetch (`scripts/colab/fetch_checkpoint_colab.ipynb`).
+No service-account key is involved. If no teammate can run it, the fallback is §9.1's untried
+route: Manas's own GCP project, billed by UPI prepayment. Try it once, and drop it if Google
+asks for a card or a recurring mandate. The checkpoint exists nowhere else: a 2026-09-22 search
+found no Hugging Face mirror.
+
 ### 9.5 IndiaAI Mission — the structurally right route, on a slow clock
 
 India's IndiaAI Mission operates a common compute facility offering subsidised

@@ -129,3 +129,59 @@ def test_report_is_written_when_asked(tmp_path):
     out = tmp_path / "ACCEPTANCE.txt"
     acc.main(["--collected", str(tmp_path / "s"), "--out", str(out)])
     assert "VERDICT: PASS" in out.read_text(encoding="utf-8")
+
+
+# --- 125M: TOLERANCE.md s6 gives it no numeric bar (PREREGISTERED.md revision 2026-09-22) ---
+
+C125 = "125m_ttt_e2e_finetune_books_8k_1x_cc"
+
+
+def statuses_for(root, checkpoint):
+    return {name: status for name, status, _ in acc.evaluate(root, checkpoint=checkpoint)}
+
+
+def test_125m_is_not_scored_against_the_1b_band(tmp_path):
+    """A plausible 125M loss sits above the 1B band. That must not FAIL a 125M session."""
+    make_session(tmp_path, l1="3.05", l2="3.05")
+    s = statuses_for(tmp_path, C125)
+    assert s["Band"] == acc.INFO
+    assert "s4.3 expectation" not in s
+    assert acc.main(["--collected", str(tmp_path), "--checkpoint", C125]) == 0
+
+
+def test_125m_pass_says_it_is_not_a_reproduction(tmp_path, capsys):
+    make_session(tmp_path, l1="3.05", l2="3.05")
+    acc.main(["--collected", str(tmp_path), "--checkpoint", C125])
+    out = capsys.readouterr().out
+    assert "not a reproduction" in out
+    assert "s4.1" not in out.split("VERDICT:")[1]
+
+
+def test_125m_still_fails_s1_to_s4(tmp_path):
+    make_session(tmp_path, l1="3.05", l2="3.06", curve=np.full(8192, 3.0, dtype=np.float32))
+    s = statuses_for(tmp_path, C125)
+    assert s["S1 monotonicity"] == acc.FAIL
+    assert s["S2 determinism"] == acc.FAIL
+    assert acc.main(["--collected", str(tmp_path), "--checkpoint", C125]) == 1
+
+
+def test_125m_s3_needs_the_control_above_the_real_loss(tmp_path):
+    """No band to be above, so S3 reads 'above the model's own real-data loss'."""
+    make_session(tmp_path, l1="3.05", l2="3.05", lc="2.9")
+    assert statuses_for(tmp_path, C125)["S3 negative control"] == acc.FAIL
+
+
+def test_125m_s3_passes_a_random_token_control(tmp_path):
+    make_session(tmp_path, l1="3.05", l2="3.05", lc="11.7")
+    assert statuses_for(tmp_path, C125)["S3 negative control"] == acc.PASS
+
+
+def test_the_1b_checkpoint_keeps_the_band(tmp_path):
+    make_session(tmp_path, l1="3.05", l2="3.05")
+    assert statuses_for(tmp_path, "1b_ttt_e2e_finetune_books_8k_1x_cc")["Band"] == acc.FAIL
+
+
+def test_an_unknown_checkpoint_is_refused(tmp_path):
+    make_session(tmp_path)
+    with pytest.raises(SystemExit):
+        acc.main(["--collected", str(tmp_path), "--checkpoint", "350m_ttt_e2e_pretrain_dclm_8k_1x_cc"])

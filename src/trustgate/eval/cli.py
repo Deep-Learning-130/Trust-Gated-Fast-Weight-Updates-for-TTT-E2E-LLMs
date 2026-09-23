@@ -171,6 +171,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Model size for --random-init. See trustgate.eval.model_build.SIZES.",
     )
     parser.add_argument(
+        "--compute-dtype",
+        choices=("bf16", "fp32"),
+        default=None,
+        help=(
+            "Override the vendor's model.compute_dtype (default: the vendor's own, "
+            "bf16). Pass fp32 on a Turing card (T4: Kaggle, Colab free), which has no "
+            "native bf16. Recorded in the victim label, so the report shows it."
+        ),
+    )
+    parser.add_argument(
         "--seq-length",
         type=int,
         default=8192,
@@ -879,6 +889,7 @@ def _build_victim(args, *, tag: str):
     from trustgate.eval import vendor_bind
     from trustgate.eval.model_build import build_from_checkpoint, build_random_init
 
+    compute_dtype = getattr(args, "compute_dtype", None)
     if args.checkpoint:
         print(f"[{tag}] loading {args.size} weights from {args.checkpoint}")
         try:
@@ -886,6 +897,7 @@ def _build_victim(args, *, tag: str):
                 checkpoint=args.checkpoint,
                 size=args.size,
                 seq_length=args.seq_length,
+                compute_dtype=compute_dtype,
                 step=args.checkpoint_step,
                 allow_layout_mismatch=args.allow_checkpoint_layout_mismatch,
             )
@@ -899,11 +911,15 @@ def _build_victim(args, *, tag: str):
         print(f"[{tag}] building a {args.size} victim at seq_length={args.seq_length}")
         try:
             cfg, model, state, mesh = build_random_init(
-                size=args.size, seq_length=args.seq_length
+                size=args.size, seq_length=args.seq_length, compute_dtype=compute_dtype
             )
         except (ImportError, ValueError) as exc:
             raise SystemExit(str(exc)) from exc
         label = f"random-init-{args.size} (NO CHECKPOINT)"
+    if compute_dtype:
+        # A dtype change alters the run condition, so it travels with the label
+        # into every report rather than living only in a shell history.
+        label = f"{label} [compute_dtype={compute_dtype}]"
 
     _VICTIM_SCOPE.enter_context(mesh)
     mini_batch = int(cfg.model.mini_batch_size)
