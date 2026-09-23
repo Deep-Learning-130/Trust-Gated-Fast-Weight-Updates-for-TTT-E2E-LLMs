@@ -181,8 +181,8 @@ and~\ref{sec:uncertainty}), drift accumulator with its bounded-drift proposition
 policy (Section~\ref{sec:policy}) --- followed by a complexity and overhead analysis
 (Section~\ref{sec:complexity}), the baselines (Section~\ref{sec:baselines}), and the
 datasets, metrics, and pre-registered evaluation protocol
-(Section~\ref{sec:protocol}). Section~IV describes the experimental setup,
-Section~V reports results, and Section~VI concludes.
+(Section~\ref{sec:protocol}). Section~IV reports what has been executed against
+that protocol, and Section~V concludes.
 
 \section{Related Work}
 \label{sec:related}
@@ -976,9 +976,10 @@ restored after the fact.
 
 \begin{proposition}[Bounded per-window drift]
 \label{prop:drift}
-Let $\fast_{\mathrm{ref}}$ denote the fast weights at the start of a budget window
-, the anchor $\anchorp$ at the beginning of a request, or the last trusted
-checkpoint after a reset. Then for every window $w$ within that budget window,
+Let $\fast_{\mathrm{ref}}$ denote the fast weights at the start of a budget
+window --- the anchor $\anchorp$ at the beginning of a request, or the last
+trusted checkpoint after a reset. Then for every window $w$ within that budget
+window,
 \begin{equation}
 \big\Vert \fast_{w+1} - \fast_{\mathrm{ref}} \big\Vert_{2} \;\leq\; C_w \;\leq\; \budget .
 \label{eq:bound}
@@ -1007,6 +1008,30 @@ it because it is checkable \emph{before} the commit, whereas the realized
 displacement is only available after, and a guarantee that can only be verified
 after the violation is not the guarantee we want. Measuring realized displacement
 as a second, tighter diagnostic is reported alongside.
+
+\subsubsection{Implementation status of the bound}
+\label{sec:driftstatus}
+Proposition~\ref{prop:drift} is a statement about the gated commit
+\eqref{eq:gatedcommit}, and it holds wherever that commit is the one being
+executed. In our own overlay it is not yet enforced, and we state this here rather
+than leave a reader to infer that a proved bound is a running one. The accumulator
+of \eqref{eq:accumulate}, the latch of \eqref{eq:latch} and the versioned store of
+Section~\ref{sec:store} are implemented and unit-tested, but they are not reachable
+from the interceptor, and the obstruction is structural rather than a matter of
+effort. The reference implementation's inner loop runs under a compiled scan whose
+carry is fixed to the model, the inner optimizer state and the recurrent and suffix
+state; a scan requires the structure of the carry out to match the carry in, so
+there is no slot in which a cumulative drift scalar and a breach latch can ride
+from one window to the next without altering the vendor's own carry signature ---
+which is precisely what an overlay is not permitted to do. The route we have
+identified threads the accumulator through the inner optimizer state, which is
+already a carry slot; we have specified that route and deliberately written no code
+for it, because doing so before the criterion of Section~\ref{sec:prereg} is
+discharged would invert the ordering this protocol exists to protect. What is
+therefore demonstrated in this paper is the per-update path --- interception,
+anchor consistency, uncertainty, and the accept/reject decision --- and what
+remains specified but unenforced is the cumulative bound and the rollback that
+depends on it.
 
 \subsubsection{Why the latch is necessary}
 Equation~\eqref{eq:latch} is monotone: once tripped, $b_w$ stays true until an
@@ -1244,26 +1269,63 @@ requires materializing $B$ per-example gradients, which the mean-based update av
 \label{sec:protocol}
 
 \subsubsection{System under test}
-All experiments use the released TTT-E2E 1B checkpoint fine-tuned on Books3 at an
-$8$K context~\cite{tandon2025tttE2E}, in its reference JAX
-implementation~\cite{bradbury2018jax,kidger2021equinox}, on a single $80$\,GB A100 or
-H100. The model is run in its meta-learning mode, which is the only mode with an
-inner loop; in pretraining mode there are no fast weights to poison and the attack is
-vacuously null.
+\label{sec:sut}
+Experiments use the released TTT-E2E $125$M checkpoint, DCLM-pretrained and
+fine-tuned on Books at an $8$K context~\cite{tandon2025tttE2E}, in its reference JAX
+implementation~\cite{bradbury2018jax,kidger2021equinox}, on a single $8$\,GB
+consumer GPU; a $16$\,GB hosted accelerator without native \texttt{bfloat16} is the
+named fallback, in which case both arms run at \texttt{float32} and the dtype is
+recorded with the result. The model is run in its meta-learning mode, which is the
+only mode with an inner loop; in pretraining mode there are no fast weights to
+poison and the attack is vacuously null.
 
-Context length is a first-order experimental variable, not a detail, and the
-released artifacts constrain how far it can be pushed. At $8$K the sliding-window
-attention spans the entire sequence and the fast weights receive only $8$ inner
-updates, so a defense evaluated there is evaluated where the mechanism it defends
-barely operates. The primary configuration is therefore the $1$B checkpoint at its
-native $8$K, extended to $32$K, the longest context for which a $1$B
-configuration is released, which quadruples the number of inner updates on the
-same weights. The $128$K regime, which exercises the mechanism sixteen times harder
-than $8$K, is reachable only through the released $3$B checkpoint and requires a
-multi-GPU node; we identify it as the setting in which the defense is most
-consequential and report it as a planned extension rather than as part of the
-committed protocol, so that no claim in this paper depends on a measurement we have
-not budgeted.
+This is a change of scale from the configuration originally pre-registered, which
+named the $1$B checkpoint on a single $80$\,GB accelerator, and we record it as a
+dated revision rather than a silent substitution. The $1$B configuration has no
+hardware: a quota request for an $80$\,GB card was refused, and the alternative
+provider available to us required roughly a day of credit deposited in advance
+under payment methods we could not use. No threshold in Table~\ref{tab:prereg}
+moved with the scale. Two consequences are fixed in advance. The environment
+soundness check of Section~\ref{sec:soundness} weakens, because the source paper
+publishes no held-out loss for $125$M at $8$K and there is therefore no numeric
+bracket to fall inside; only the structural checks apply, and a pass must not be
+read as a reproduction. And a result at $125$M is a result at $125$M: a corruption
+demonstrated there is an existence proof at that scale and makes no claim about
+$1$B, while a null there may be a null only at that scale.
+
+Context length is a first-order experimental variable, not a detail. At $8$K the
+sliding-window attention spans the entire sequence and the fast weights receive
+only $8$ inner updates, so a defense evaluated there is evaluated where the
+mechanism it defends barely operates. The committed configuration is the released
+checkpoint at its native $8$K, and every claim below is scoped to that.
+
+Table~\ref{tab:baselines} and Fig.~\ref{fig:baselines} place TTT-E2E against six
+prior long-context methods, as published by its
+authors~\cite{tandon2025tttE2E}: full attention, sliding-window attention, a
+sliding-window/full hybrid, Mamba~2, Gated DeltaNet, and TTT with a key-value
+bottleneck, all on held-out Books loss at five context lengths, at 3B parameters
+and $3\times$ Chinchilla compute. These are published values, not our
+measurements, and we recovered them from the source paper's vector figure data
+instead of reading them off by eye. Pairing the axis tick stubs with their labels
+inside the figure's own coordinate space gives a linear calibration whose maximum
+residual is $4\times10^{-16}$ nats. We then cross-validated every value against a
+second figure that plots the same runs as differences from full attention; all 35
+agree to four decimal places. Three further constraints corroborate the reading.
+At 8K context with window $k=8\text{K}$, sliding-window attention and the hybrid
+\emph{are} full attention, and all three curves do read identically. Every value
+lands on the 0.001 grid that the source prints elsewhere. And every qualitative
+claim in the source captions is reproduced.
+
+\input{figures/table1_baselines}
+\input{figures/fig1_baselines}
+
+One number from Table~\ref{tab:baselines} constrains what any corruption
+measurement can mean, and it is why the table appears here rather than among our
+own results. At 8K context the entire benefit of test-time training over
+sliding-window attention is $2.328 - 2.314 = 0.014$ nats. That margin is published
+at 3B and the system under test here is $125$M, so it is an indication of the
+mechanism's headroom rather than a figure for our configuration; we return to it in
+Section~\ref{sec:prereg}, where the degradation bar is set against it.
 
 \subsubsection{Datasets}
 Table~\ref{tab:data} lists the corpora and the role each plays. The separation is
@@ -1365,11 +1427,15 @@ identical. This is enforced by an assertion over the run condition rather than l
 to care, since every one of those fields is a plausible confound.
 
 \subsubsection{Environment soundness}
+\label{sec:soundness}
 Before any corruption is measured, the unmodified reference evaluation is run on the
 released checkpoint and required to fall inside a two-sided bracket,
 $2.314 < \ell < 2.805$ nats/token, whose bounds are derived from values printed or
 plotted in~\cite{tandon2025tttE2E} and adjusted only by differences whose \emph{sign}
-is certain. We are explicit about what this establishes and what it does not. It
+is certain. That bracket is a $1$B quantity. At the $125$M scale of
+Section~\ref{sec:sut} the source publishes no corresponding value, so no numeric
+bracket is available and the structural checks below carry the whole weight of this
+step. We are explicit about what this establishes and what it does not. It
 establishes that the environment is sound (correct weights, tokenizer, corpus, and
 metric), which is what makes a later corruption measurement attributable to the
 attack rather than to the setup. It is \emph{not} a reproduction of a published
@@ -1422,6 +1488,19 @@ visibly adversarial stream from counting at all. A result is additionally treate
 invalid, irrespective of the numbers, if the control was not matched, if degradation
 was measured on the poison stream itself rather than on held-out data, if fluency was
 scored with the victim model, or if fewer than five usable seeds were obtained.
+
+The degradation bar deserves to be read against the margin recorded in
+Section~\ref{sec:sut}, because the two are not independent and the comparison is
+unflattering. Ten per cent of a ${\sim}2.3$-nat baseline is ${\sim}0.23$ nats,
+roughly sixteen times the $0.014$ nats that test-time training buys over
+sliding-window attention at 8K. We state the asymmetry where the bar is set rather
+than discovering it beside a result. It does not make the bar impossible ---
+corruption may exceed benefit, since breaking is easier than helping and the
+attacker optimises while the mechanism does not --- but it does mean the bar is
+demanding at the cheapest context length, which is also the length at which the
+mechanism does the least work. Any negative result under this protocol is scoped
+to 8K and to the eight inner updates a single sequence provides, and is not a claim
+that fast weights are unpoisonable.
 
 For the defense itself, the corresponding bar is comparative: the gate must suppress
 the demonstrated attack while holding the clean regression \eqref{eq:cleanreg} small,

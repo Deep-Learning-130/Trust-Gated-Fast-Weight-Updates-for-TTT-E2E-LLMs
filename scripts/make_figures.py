@@ -290,7 +290,7 @@ def table_prereg(observed=None) -> None:
         "\\caption{Pre-registered criteria, frozen 2026-07-28 before any attack code\n"
         "was run. All four are required jointly. The observed column reports the\n"
         "scaled-down pilot; it is \\emph{not} the pre-registered verdict, which\n"
-        "requires the released 1B checkpoint and the GPT-2 fluency instrument.}\n"
+        "requires the released checkpoint and the GPT-2 fluency instrument.}\n"
         "\\label{tab:results}\n"
         "\\centering\n"
         "\\begin{tabular}{lcc}\n"

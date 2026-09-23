@@ -46,7 +46,9 @@ benign-looking input stream that steers those updates so later, unrelated
 inputs are handled worse, with no write access to the pretrained weights --- and
 specify a trust gate that admits each proposed update only if it is consistent
 with a frozen anchor and within a bounded cumulative-drift budget, restoring a
-checkpoint in $O(1)$ on breach. Whether the gate is worth building is decided by a
+checkpoint in $O(1)$ on breach; we prove a per-window drift bound for that gated
+commit, and record which part of it our own overlay does not yet enforce.
+Whether the gate is worth building is decided by a
 criterion pre-registered before any attack code existed. In a scaled-down pilot,
 the measured effect size clears that criterion --- yet a negative control with no
 attacker clears it on 55\% of draws, and the observed value sits at the median of
