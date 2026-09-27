@@ -302,6 +302,7 @@ with the reason, and leaves the superseded value visible.
 | 2026-08-08 | Initial pre-registration. Nothing observed. | — |
 | 2026-09-16 | **No bar moved.** Scope note: the first 1B baseline will be measured over a *truncated* `/val`. See below. | The 2026-09-14 probe put `/val` at 2.0B tokens; a full pass is ~7.5 GPU-h and bar S2 wants two of them. |
 | 2026-09-16 | **No bar moved.** Default subset lowered from 150M to **50M tokens** (6,103 sequences). See the second note below. | Cost: the session is paid per minute by one person, and the band does not need 150M. |
+| 2026-09-27 | **No bar moved.** The 125M C1 evaluates **10M tokens** (1,220 sequences), not 50M (Manas Maahir). The 1B default stays 50M. See the note below. | On a T4 one 50M eval is ~5 h, and C1 needs three: over Kaggle's 12 h limit, and C1 cannot resume. Written before any C1 result. |
 | 2026-09-27 | **S4 narrowed** (Manas Maahir): `trustgate.attention_patch` is allowed when declared by its marker in every run. Superseded wording kept in §5. See the note below. | The 125M C1 fits neither the laptop (batch-4 floor OOMs) nor the vendor's cuDNN kernel on a T4 (no engine, any dtype). Written before any C1 result. |
 
 ### 2026-09-16 — measuring the baseline over a subset of `/val`
@@ -415,3 +416,28 @@ A host that uses the patch must first pass `run_smoke.py --blocked-attention`, w
 project name `ttt-trustgate-session1`, which the vendor prints in its config and in every run
 URL, so S4 would have failed every clean run. The project name no longer counts as the
 overlay.
+
+
+### 2026-09-27 — the 125M C1 evaluates 10M tokens
+
+**Written before any C1 result exists.** Decided by Manas Maahir. This is a sampling
+decision, like the 2026-09-16 note, and not a bar.
+
+**Why.** Session 1's C1 runs on a Kaggle T4, the only free hardware that fits it (revision
+above). The gate smoke timed one inner step at 346 ms on the T4, so one 8,192-token sequence
+takes about 3 s. At 50M tokens (6,103 sequences) one eval is about 5 h. C1 needs three evals:
+S2's repeat run and S3's control on top of the first. That comes to about 15–16 h, over
+Kaggle's 12 h per run, and an eval cannot resume.
+
+**What changes.** For `125m_ttt_e2e_finetune_books_8k_1x_cc` only, `VAL_TOKENS` is **10,000,000**:
+1,220 sequences, about 1 h per eval, and C1 in one Kaggle run. The 1B default stays 50M.
+
+**Why no bar is weakened.** At 125M there is no numeric bar (§6), so §4.1's statistical
+precision argument does not apply. The bars that do apply are unaffected:
+
+- **S1** averages the per-token curve over 1,220 sequences.
+- **S2** is a determinism check, the same command run twice, whatever the size.
+- **S3** only needs the control to land above the real-data loss.
+
+The one thing a smaller subset costs is coverage. Fewer books are sampled, which matters only
+to a numeric comparison, and there is none at 125M.

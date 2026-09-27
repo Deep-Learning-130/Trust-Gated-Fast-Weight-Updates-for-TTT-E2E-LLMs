@@ -303,3 +303,16 @@ relative degradation >= 10%, fluency ratio <= 1.5. They are still pinned by
 - Not the primary metric, the five seeds, the SELECT headline, the invalidating conditions,
   or the fluency instrument.
 - Not revision 2026-09-22's asymmetry: a 125M STOP still ends the project.
+
+### Addendum 2026-09-27 (same day, still before any result): where each experiment runs
+
+- **000 (C1)** runs on the Kaggle T4 with `trustgate.attention_patch`, at 10M `/val` tokens
+  (`TOLERANCE.md`, same date). Its smoke passed `matches-vendor-kernel` there, at 2.54e-3 nats
+  per chunk against the laptop's cuDNN numbers (bar 5e-3, set before the run). That is about
+  5x the laptop's own blocked-vs-cuDNN gap and about 12x the vendor's run-to-run jitter,
+  recorded here as measured.
+- **001 (C1b-C5, including the C3 verdict)** runs on the laptop, on the **vendor's own cuDNN
+  kernel**. The 003 smoke passes 7/7 there on the unmodified loss and attention. The verdict
+  therefore rests on the vendor's computation, not on the patch.
+- The two experiments share no measurement, so running them on different hosts mixes no
+  comparison. Within each, one host and one kernel, as above.
