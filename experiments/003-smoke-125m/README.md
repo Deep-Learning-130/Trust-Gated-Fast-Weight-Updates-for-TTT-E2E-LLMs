@@ -62,20 +62,115 @@ bash experiments/003-smoke-125m/setup.sh
 PYTHONPATH=src python experiments/003-smoke-125m/run_smoke.py --seq-length 8192
 ```
 
-On a Colab **T4**, add `--compute-dtype fp32`: T4 is Turing and has no native
-bf16, while the vendor default is `compute_dtype: bf16` (`config.py:107`). On
-an 8 GB card, `--seq-length 4096` still gives 4 inner steps.
+**Do not pass `--compute-dtype fp32`.** An earlier version of this file
+recommended it on Turing cards, reasoning that T4 has no native bf16 while the
+vendor default is `compute_dtype: bf16` (`config.py:107`). That advice was
+wrong and the flag cannot work — see "the prefix path forces cuDNN" below. The
+flag is kept because it records what was tried, not because there is a card it
+helps.
+
+On an 8 GB card, `--seq-length 4096` still gives 4 inner steps.
 
 ### Hardware
 
-| | Local RTX 3070 Ti Laptop | Colab T4 (free) | Colab L4 / A100 |
-|---|---|---|---|
-| VRAM | 8 GB | 15 GB | 22 / 40 GB |
-| Native bf16 | yes (Ampere) | **no** (Turing) | yes |
-| JAX CUDA | **WSL2 only** — no Windows wheels | native | native |
+| | Local RTX 3070 Ti Laptop | Kaggle T4 x2 | Kaggle P100 | Colab |
+|---|---|---|---|---|
+| VRAM | 8 GB | 2 x 16 GB | 16 GB | 15 GB |
+| Native bf16 | yes (Ampere) | **no** (Turing) | **no** (Pascal) | **no** (T4) |
+| Devices JAX sees | 1 | **2 — see below** | 1 | 1 |
+| JAX CUDA | **WSL2 only** — no Windows wheels | native | native | native |
 
-Colab is the recommended primary: it removes the driver/toolkit variable, and
-15 GB gives headroom the 8 GB card does not.
+**Colab was tried on 2026-09-14 and does not work.** It runs Python 3.13 with
+JAX 0.11, against the vendor's `requires-python = ">=3.12"` and `jax[cuda12]<0.6`
+— roughly six releases apart. Either no cp313 wheel exists for JAX 0.5.x or pip
+drags `jaxlib` and the whole `nvidia-*` set backwards into a CUDA link that fails
+later and less legibly. Bumping the pin is not a fix: the carry overlay depends
+on JAX and equinox tree semantics and on `lax.scan` carry behaviour, so a pass
+against a different JAX would not transfer to the 1B run.
+
+**Kaggle works, via `uv`.** The vendor's README says it uses `uv` for package
+management, so fetching a standalone 3.12 sidesteps the host Python entirely
+rather than fighting it — which is more faithful to the vendor setup than
+`pip install` against whatever the notebook ships:
+
+```
+pip install uv
+uv venv --python 3.12 /kaggle/working/venv
+uv pip install --python /kaggle/working/venv/bin/python -e vendor/ttt-e2e
+```
+
+Kaggle's `sitecustomize` imports `wrapt`, which a clean venv lacks; the
+resulting `ModuleNotFoundError` is printed and then ignored by the interpreter,
+and is not a failure.
+
+An earlier version of this file said to prefer P100 over T4 x2. **That was
+backwards on the axis that matters.** P100 is Pascal (SM60), older than Turing,
+and the constraint below is architectural rather than about device count. The
+device-count problem is handled in code now; the architecture one cannot be.
+
+#### The prefix path forces cuDNN, so fp32 is rejected outright
+
+Observed on Kaggle 2026-09-14: three checks failed with
+
+```
+NotImplementedError: Q must be fp16/bf16/fp8_e4m3fn/fp8_e5m2, got float32
+```
+
+`attention.py:214` selects the kernel as
+
+```python
+implementation="cudnn" if (self.config.force_flash or is_prefix) else None
+```
+
+`ext-125m-e2e-32K.yaml` sets `force_flash: False`, but `is_prefix` is true for
+every prefix block, so **cuDNN fused attention is used regardless of the flag**.
+It accepts only fp16/bf16. There is therefore no card on which `fp32` runs this
+model, and `force_flash: False` does not mean what it appears to mean.
+
+**Settled 2026-09-15 on Kaggle T4, runner revision `45c0983`.** With the dtype
+corrected to the bf16 default, the rejection moved from the dtype check to the
+kernel search itself:
+
+```
+XlaRuntimeError: INTERNAL: No valid engine configs for Matmul_MUL_GEN_INDEX_...
+in external/xla/xla/stream_executor/cuda/cuda_dnn.cc(8629):
+  'graph_.create_execution_plans({cudnn_frontend::HeurMode_t::A})'
+```
+
+That is cuDNN reporting it has **no engine for this graph on this GPU**. The
+dtype error was masking it. cuDNN fused attention requires **Ampere (SM80) or
+newer**, so Turing (T4, SM75), Pascal (P100, SM60) and Volta (V100, SM70) are
+all excluded — and because `implementation="cudnn"` is an explicit request
+rather than a hint, there is nothing for it to fall back to.
+
+**Consequence: the RTX 3070 Ti laptop (SM86) is the only free hardware this
+project has that can execute the prefix pass at all**, despite having the least
+memory of every candidate considered. Kaggle is out for this model on every
+accelerator it offers: both its GPUs are pre-Ampere, and its TPU cannot service
+a CUDA kernel request at all.
+
+Not worked around, and deliberately so. Setting `suffix_len` to the layer count
+would leave no prefix blocks and therefore no cuDNN call, but it would also make
+every block adaptive — a different architecture, not a cheaper view of this one.
+The only other lever is editing `attention.py`, which ADR-002 forbids.
+
+#### More than one visible accelerator will abort model construction
+
+`ModelSharding.__init__` (`sharding.py:33-35`) asserts
+`n_data_parallel * n_state_parallel == jax.device_count()`. This run is
+single-device by construction, so on a two-device box the assertion fires inside
+`build_model`, after the vendor stack has imported and a minute of startup has
+been spent.
+
+The vendor's own knobs do not prevent it. `backend.local_device_ids` and
+`backend.num_devices` are read only inside `if distributed_config.distributed:`
+(`jax_utils.py:44-48`), and this runner sets `backend.distributed=false` — so
+both are **dead config here**, despite being set. `run_smoke.py` therefore
+sets `CUDA_VISIBLE_DEVICES=0` itself, before importing jax, via `setdefault`
+so an explicit choice of card still wins.
+
+Worth carrying forward: the same dead-knob behaviour applies to any multi-GPU
+rental box, where the failure would land after billing had started.
 
 ### Config overrides, and why each one
 
@@ -127,6 +222,56 @@ language model and that no number from it transfers.
 `results/smoke.json` — every check with its bar, its observation, and why it
 matters. Git-ignored. Its first key is a `disclaimer` field, so a number lifted
 out of it carries its own caveat.
+
+## What has actually been measured
+
+`param-count`, on Kaggle T4, runner `45c0983` — the first real numbers off the
+vendor model rather than off a formula:
+
+| | observed | reconstructed |
+|---|---|---|
+| trainable params | **184,363,776** | matches to within the RMSNorm weights |
+| inner (fast) weights | **11,501,568** | 3 × 3 × 768 × 1664 — **exact** |
+
+The inner count reconstructs exactly: `suffix_len: 3`, and each suffix block's
+`feed_forward_prime` is a SwiGLU holding three 768 × 1664 matrices, so
+3 × 3,833,856 = 11,501,568. `COST_MODEL.md` §2.1's analytic model is validated
+at 125M against a real build.
+
+**6.2% of the model is fast weights.** That is the entire attack surface this
+project is about, and it is the first time the figure has been anything other
+than an estimate.
+
+Nothing downstream of a forward pass has a number yet. Those are blocked on
+hardware, not on arithmetic.
+
+## First-launch failures found so far
+
+**This list is the deliverable.** Every row is a failure that would otherwise
+have landed on a rented box with the meter running, and several of them look
+like working configuration right up until the moment they do not. Kept current
+as the run progresses; a row is only removed if it turns out to be wrong.
+
+| # | Failure | Where it surfaces | Resolution |
+|---|---|---|---|
+| 1 | Colab: Python 3.13 + JAX 0.11 against `requires-python >=3.12` and `jax[cuda12]<0.6` | `pip install` | not fixable on Colab; `uv` with a standalone 3.12 elsewhere |
+| 2 | `load_part=all` raises on the released checkpoint | after restore begins | `load_part=params` — the tree has `model_weights` only, no `opt_state` |
+| 3 | `backend.local_device_ids` / `num_devices` are dead unless `distributed=true` | `ModelSharding.__init__`, during model construction | `CUDA_VISIBLE_DEVICES`, set before jax imports |
+| 4 | `force_flash: False` does not disable cuDNN on prefix blocks; fp32 rejected | first forward pass | bf16 only — and **confirmed Ampere-only**, see below |
+| 5 | `param-count` raised instead of reporting, because `suffix_blocks` does not exist pre-split | our own check | count against `binding.model_split` |
+| 6 | a stale checkout read as a persistent technical failure for three sessions | everywhere, silently | `run_smoke.py` prints its own revision |
+
+Rows 2, 3 and 4 share a shape worth naming: **the configuration reads as
+correct and is not.** `load_part=all` is a documented option, `local_device_ids`
+is a documented knob, and `force_flash: False` looks like it turns flash
+attention off. Each one is ignored or overridden somewhere that the config file
+does not mention. Reading the config is not sufficient evidence that a setting
+took effect — which is the general lesson this experiment was built to buy
+cheaply.
+
+Row 5 is ours, and it is the one to be least comfortable about: the check was
+guarding against a structural null, and could never have reported one, because
+it always raised first.
 
 ## What this unblocks, and what it does not
 

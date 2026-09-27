@@ -95,6 +95,7 @@ def build_config(
     size: str = "125m",
     seq_length: int = DEFAULT_SEQ_LENGTH,
     compute_dtype: str | None = None,
+    param_dtype: str | None = None,
     exp_dir: str = "/tmp/trustgate-model",
     num_devices: int = 1,
 ):
@@ -103,8 +104,14 @@ def build_config(
     Args:
         size: one of `SIZES`. Selects `+experiment=<size>/extension/...`.
         seq_length: must be a multiple of 1024. 8192 gives 8 inner steps.
-        compute_dtype: override `model.compute_dtype`. Pass `"fp32"` on Turing
-            (T4) -- it has no native bf16 and the vendor default is bf16.
+        compute_dtype: override `model.compute_dtype` (vendor default bf16).
+            `"fp32"` cannot run this model on any card: every prefix block
+            forces cuDNN fused attention (attention.py:214), which takes
+            fp16/bf16 only -- and needs Ampere or newer, so a T4 is out in any
+            dtype (experiments/003-smoke-125m/README.md, commit a7447ce).
+        param_dtype: override `model.param_dtype` (vendor default fp32). Halves
+            the parameter footprint at bf16 without touching attention
+            geometry, but changes stored weight precision -- record it.
         exp_dir: vendor run output. Must be outside the repo; the vendor's own
             default is `./experiments`, which from the repo root writes straight
             into our tracked tree.
@@ -155,6 +162,10 @@ def build_config(
     ]
     if compute_dtype:
         overrides.append(f"model.compute_dtype={compute_dtype}")
+    if param_dtype:
+        # `qk_norm` defaults True (config.py:115) and q_norm/k_norm are built at
+        # param_dtype (attention.py:100-101). Recorded by every caller.
+        overrides.append(f"model.param_dtype={param_dtype}")
 
     with initialize_config_dir(config_dir=str(VENDOR_CONFIGS), version_base=None):
         cfg = compose(config_name="config", overrides=overrides)

@@ -21,6 +21,7 @@ failures in one session rather than one per session.
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import os
@@ -38,6 +39,23 @@ sys.path.insert(0, str(ROOT / "src"))
 # leaves nothing for the 1024-token logit tensor (1024 x 128256 x 4B = 525 MB
 # per chunk, and value_and_grad holds more than one).
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
+# This run is single-device by construction: n_data_parallel=1 and
+# n_state_parallel=1 below, and `ModelSharding.__init__` (sharding.py:33-35)
+# asserts their product equals `jax.device_count()`. On any box with more than
+# one accelerator -- Kaggle's T4 x2, a multi-GPU rental -- that assertion fires
+# during model construction, after the vendor stack has already been imported.
+#
+# The vendor's own knobs do NOT prevent this. `backend.local_device_ids` and
+# `backend.num_devices` are read only inside `if distributed_config.distributed:`
+# (jax_utils.py:44-48), and this runner sets `backend.distributed=false`, so both
+# are dead config here. CUDA_VISIBLE_DEVICES is the only lever that actually
+# changes what JAX enumerates, and it has to be set before jax is imported.
+#
+# setdefault, so an explicit `CUDA_VISIBLE_DEVICES=1` to pick a different card
+# still wins. Wanting several devices means changing n_data_parallel too, which
+# is a different experiment from this one.
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 
 
 @dataclass
@@ -102,6 +120,7 @@ def build_config(args):
         size="125m",
         seq_length=args.seq_length,
         compute_dtype=args.compute_dtype,
+        param_dtype=args.param_dtype,
         exp_dir=args.exp_dir,
     )
 
@@ -134,29 +153,78 @@ def check_gpu(c):
 
 @check(
     "random-init-loss",
-    "If CE at init is not ln(vocab), the loss, the masking or the dtype is "
-    "wrong, and nothing downstream of it can be trusted.",
+    "If the FIRST chunk's CE is not ln(vocab), the loss, the masking or the "
+    "dtype is wrong, and nothing downstream of it can be trusted.",
 )
 def check_random_init_loss(c, cfg, model, state, mesh, tol=0.05):
     import jax.numpy as jnp
 
     from trustgate.eval import vendor_bind
 
-    expected = math.log(cfg.model.vocab_size)
+    # ln(vocab) is the CE of a *uniform* predictive distribution, and a
+    # random-init model is not uniform. With tied embeddings the logits are
+    # h @ E.T, where the final RMSNorm leaves h at unit second moment and E is
+    # initialised N(0, initializer_range^2). So each logit has variance
+    # hidden_size * initializer_range^2, and for large V
+    #
+    #     E[CE] = E[logsumexp(z)] - E[z_target] ~= ln(V) + sigma^2 / 2
+    #
+    # At this config that is 11.7618 + 0.1536 = 11.9154 against an observed
+    # 11.8858 -- a residual of -0.030, inside the existing tolerance.
+    #
+    # This correction was added 2026-09-15, AFTER seeing 11.8858 fail against a
+    # bare ln(V). It is a derivation from two config values rather than a bar
+    # widened to fit: it predicts a value 0.030 ABOVE what was observed, and it
+    # would fail just as loudly if the loss were wrong in the other direction.
+    # Nothing pre-registered is touched -- this is an instrument check, and
+    # Standing Rule 5 governs PREREGISTERED.md, not this file.
+    uniform = math.log(cfg.model.vocab_size)
+    init_logit_var = cfg.model.hidden_size * cfg.model.initializer_range**2
+    expected = uniform + init_logit_var / 2
     seq = vendor_bind.make_batch(
         dummy_tokens(cfg.training.seq_length + 1, seed=0),
         bos_token_id=cfg.model.bos_token_id,
     )
 
     with mesh:
-        loss, _metrics = model.loss_for_sequence(seq, state)
-    observed = float(jnp.asarray(loss))
+        loss, metrics = model.loss_for_sequence(seq, state)
 
-    detail = f"CE {observed:.4f} nats vs ln({cfg.model.vocab_size}) = {expected:.4f}"
+    # The bar is the FIRST chunk, not the mean. `loss_for_sequence` returns
+    # `metrics[M.loss].mean()` in meta mode (`transformer.py:720`), and each
+    # chunk is scored after the inner loop has already adapted on the ones
+    # before it. Only chunk 0 is measured at initialisation; the mean is a
+    # partly-adapted quantity and is *expected* to sit below ln(vocab).
+    #
+    # Checking the mean against ln(vocab) -- as this did until 2026-09-15 --
+    # reports a working inner loop as a failure, and invites someone to "fix"
+    # the model until it matches a bar that does not describe it.
+    from ttt.model.transformer import MetaModel
+
+    per_chunk = [float(x) for x in jnp.asarray(metrics[MetaModel.MetricType.loss]).ravel()]
+    observed = per_chunk[0]
+    mean = float(jnp.asarray(loss))
+
+    curve = ", ".join(f"{v:.3f}" for v in per_chunk)
+    drop = per_chunk[0] - min(per_chunk)
+    detail = (
+        f"chunk 0 CE {observed:.4f} vs expected {expected:.4f} "
+        f"(= ln {cfg.model.vocab_size} + init logit var/2 = {uniform:.4f} + "
+        f"{init_logit_var / 2:.4f}); mean over {len(per_chunk)} chunks "
+        f"{mean:.4f}, falling {drop:.3f} nats; curve [{curve}]"
+    )
+    obs = dict(
+        observed_nats=observed,
+        expected_nats=expected,
+        uniform_nats=uniform,
+        init_logit_var=init_logit_var,
+        mean_nats=mean,
+        per_chunk_nats=per_chunk,
+        inner_loop_drop_nats=drop,
+    )
     if abs(observed - expected) <= tol:
-        c.ok(detail, observed_nats=observed, expected_nats=expected)
+        c.ok(detail, **obs)
     else:
-        c.fail(detail + " -- outside tolerance", observed_nats=observed, expected_nats=expected)
+        c.fail(detail + " -- chunk 0 outside tolerance", **obs)
 
 
 @check(
@@ -164,13 +232,29 @@ def check_random_init_loss(c, cfg, model, state, mesh, tol=0.05):
     "A mismatch means the config that built this model is not the config the "
     "analytic cost model was priced against (COST_MODEL.md section 2.1).",
 )
-def check_param_count(c, model):
+def check_param_count(c, model, binding):
+    """Counted against `binding.model_split`, not against `model`.
+
+    A freshly built `MetaModel` has **no `suffix_blocks` attribute at all**, so
+    `model.inner_parameters()` cannot match `spec_inner` and raises rather than
+    returning zero. `BlockCollectionSplit` is constructed *inside*
+    `loss_for_sequence` (`transformer.py:662-668`) and grafted onto the tree at
+    `:676`, on every call -- it is not part of model construction. Counting the
+    fast weights therefore requires a split model, which is exactly what
+    `vendor_bind.bind` already produces.
+
+    `trainable_parameters()` is safe on the unsplit tree: it filters on
+    `spec_outer`, which does not mention `suffix_blocks`.
+    """
     import jax
 
     trainable = sum(
         x.size for x in jax.tree_util.tree_leaves(model.trainable_parameters())
     )
-    inner = sum(x.size for x in jax.tree_util.tree_leaves(model.inner_parameters()))
+    inner = sum(
+        x.size
+        for x in jax.tree_util.tree_leaves(binding.model_split.inner_parameters())
+    )
     c.ok(
         f"{trainable:,} trainable, {inner:,} inner (fast) weights",
         trainable_params=int(trainable),
@@ -206,6 +290,12 @@ def check_determinism(c, cfg, mesh):
         with mesh:
             loss, _ = model.loss_for_sequence(seq, state)
         losses.append(float(jnp.asarray(loss)))
+        # Drop the build before the next one. Holding both costs a second
+        # fp32 copy of the parameters -- 737 MB at 125M -- which is enough to
+        # push an 8 GB card into OOM on a run that otherwise fits. `float()`
+        # above has already pulled the only value we need back to the host.
+        del model, state, loss
+        gc.collect()
 
     if losses[0] == losses[1]:
         c.ok(f"bit-identical across two builds: {losses[0]:.6f}", losses=losses)
@@ -320,6 +410,40 @@ def check_eval_differs(c, binding, mesh, carry, eval_tokens, condition):
 # ---------------------------------------------------------------------------
 
 
+def code_revision() -> str:
+    """Identify the checked-out revision, so every run says what it ran.
+
+    Three sessions of this experiment were spent on a stale checkout: the output
+    was byte-identical each time and read as a persistent technical failure
+    rather than an un-applied `git pull`. A result that cannot name its own code
+    is not reproducible, and more immediately it cannot be told apart from the
+    run before it.
+    """
+    import subprocess
+
+    def _git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(ROOT), *args],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    try:
+        head = _git("rev-parse", "--short", "HEAD")
+        if head.returncode != 0:
+            return "unknown (git failed: " + head.stderr.strip()[:80] + ")"
+        # -c core.fileMode=false: this repo is routinely checked out on a
+        # Windows filesystem and run from WSL, where git sees different mode
+        # bits and reports every tracked file as modified. Without this the
+        # dirty marker fires on a clean tree, which is worse than not having
+        # it -- a marker that is always on carries no information.
+        dirty = _git("-c", "core.fileMode=false", "status", "--porcelain").stdout.strip()
+        return head.stdout.strip() + (" +local-changes" if dirty else "")
+    except Exception as exc:  # noqa: BLE001 - never block the run on this
+        return "unknown (" + type(exc).__name__ + ")"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -339,8 +463,16 @@ def main():
     ap.add_argument(
         "--compute-dtype",
         default=None,
-        help="Override model.compute_dtype. Use fp32 on a T4 (Turing has no "
-        "native bf16). Recorded in the results either way.",
+        help="Override model.compute_dtype (vendor default bf16). NOTE: fp32 "
+        "cannot work -- the prefix path forces a cuDNN kernel that takes "
+        "fp16/bf16 only. Recorded in the results either way.",
+    )
+    ap.add_argument(
+        "--param-dtype",
+        default=None,
+        help="Override model.param_dtype (vendor default fp32). Try bf16 if the "
+        "attention kernel still reports float32 with compute_dtype at bf16: "
+        "qk_norm runs at param_dtype and promotes xq back up. Recorded.",
     )
     ap.add_argument("--exp-dir", default="/tmp/trustgate-smoke")
     ap.add_argument("--out", default=str(RESULTS / "smoke.json"))
@@ -368,6 +500,7 @@ def main():
         )
         return 2
 
+    print("runner revision: " + code_revision())
     check_gpu()
     if not CHECKS[-1].passed:
         print(f"\n[FAIL] gpu-present: {CHECKS[-1].detail}", file=sys.stderr)
@@ -381,14 +514,16 @@ def main():
     model, state, mesh = build_model(cfg)
 
     check_random_init_loss(cfg, model, state, mesh)
-    check_param_count(model)
-    check_determinism(cfg, mesh)
 
     from trustgate.eval import vendor_bind
     from trustgate.eval.harness import RunCondition, eval_tokens_digest
 
     with mesh:
         binding = vendor_bind.bind(model, state)
+
+    # After bind, not before: the fast weights do not exist as an addressable
+    # subtree until the block split has happened. See check_param_count.
+    check_param_count(model, binding)
 
     check_inner_lr(binding)
 
@@ -422,6 +557,14 @@ def main():
     if "carry" in adapted:
         check_eval_differs(binding, mesh, adapted["carry"], eval_tokens, condition)
 
+    # Determinism runs LAST, and deliberately. It is the only check that builds
+    # a second model, so on a card where memory is tight it is the one most
+    # likely to fail -- and it is also the least important. Running it before
+    # the carry check meant an 8 GB box spent its last free bytes proving the
+    # forward pass was reproducible and then had nothing left for the check the
+    # whole experiment exists for.
+    check_determinism(cfg, mesh)
+
     # ---- report ----
     print("\n" + "=" * 72)
     failed = [c for c in CHECKS if not c.passed]
@@ -453,6 +596,8 @@ def main():
                     "stream_sequences": args.stream_sequences,
                     "mini_batch_size": binding.mini_batch_size,
                     "compute_dtype": args.compute_dtype or "bf16 (config default)",
+                    "param_dtype": args.param_dtype or "fp32 (config default)",
+                    "code_revision": code_revision(),
                     "suffix_len": binding.suffix_len,
                 },
                 "checks": [
