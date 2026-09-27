@@ -1,0 +1,34 @@
+{
+  "what": "Per-chunk meta-learning loss of random-init 125M on the vendor's own cuDNN attention: loss_for_sequence on make_batch(dummy_tokens(8193, seed=0)), 8 chunks of 1024. The same seeded model and tokens on any GPU; run_smoke.py --blocked-attention compares against it.",
+  "measured": "2026-09-27, compare_attention.py and the 003 smoke (identical to the last digit across processes)",
+  "device": "NVIDIA GeForce RTX 3070 Ti Laptop GPU (SM86)",
+  "stack": "jax 0.5.3, cuDNN 9.26.0.51, bf16 compute, XLA_PYTHON_CLIENT_MEM_FRACTION=0.90",
+  "code_revision": "edfa3c5 (model and loss path unchanged since)",
+  "cudnn_per_chunk": [
+    11.885757446289062,
+    10.708273887634277,
+    10.162581443786621,
+    10.128308296203613,
+    9.949092864990234,
+    9.923343658447266,
+    9.851255416870117,
+    9.867696762084961
+  ],
+  "blocked_attention_same_laptop_per_chunk": [
+    11.886137962341309,
+    10.70833969116211,
+    10.162239074707031,
+    10.128561973571777,
+    9.949633598327637,
+    9.923839569091797,
+    9.85133171081543,
+    9.867670059204102
+  ],
+  "blocked_vs_cudnn_max_abs_gap_nats": 0.0005407333374023438,
+  "kernel_level_blocked_vs_cudnn": {
+    "mean_abs": 6.227815174497664e-05,
+    "max_abs": 0.015625,
+    "mean_abs_output": 0.029742803424596786
+  },
+  "scale": "vendor run-to-run jitter 2.0e-4 nats/chunk; TOLERANCE.md band 0.491 nats; the inner loop falls ~2.0 nats over 8 chunks"
+}

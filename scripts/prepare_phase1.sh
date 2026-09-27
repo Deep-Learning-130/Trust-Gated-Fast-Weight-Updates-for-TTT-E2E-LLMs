@@ -90,9 +90,16 @@ else
     --billing "$GCP_BILLING_PROJECT" --out "$T"
 fi
 
+# BLOCKED_ATTENTION=1 (from session.env): the vendor's cuDNN attention cannot run on
+# this GPU, so every CLI call installs trustgate.attention_patch (TOLERANCE.md S4
+# revision 2026-09-27). It is recorded in the victim label of every report.
+ATTN_FLAG=""
+[[ "${BLOCKED_ATTENTION:-0}" == "1" ]] && ATTN_FLAG="--blocked-attention"
+
 say "5. gate smoke: random-init 125m, the real vendor forward (~minutes, no verdict)"
 SMOKE="$EXP_DIR/gate-smoke"
-PYTHONPATH="$repo_root/src" "$VPY" -m trustgate.eval.cli \
+XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.90}" \
+PYTHONPATH="$repo_root/src" "$VPY" -m trustgate.eval.cli $ATTN_FLAG \
   --objective degrade --strategy select --gate-eval \
   --random-init --size 125m --stream-tokens 8192 --seeds 0 1 \
   --overhead-repeats 3 --out "$SMOKE" > "$SMOKE.log" 2>&1 \
@@ -122,7 +129,7 @@ export DTYPE_FLAG="${COMPUTE_DTYPE:+--compute-dtype $COMPUTE_DTYPE}"
 export CKPT_DEST="$CKPT_DEST"
 export CKPT_MANIFEST="$CKPT_MANIFEST"
 # Unbuffered, so the timing lines reach the tee'd log as they happen.
-export TG="env PYTHONPATH=$repo_root/src PYTHONUNBUFFERED=1 XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.90} $VPY -m trustgate.eval.cli"
+export TG="env PYTHONPATH=$repo_root/src PYTHONUNBUFFERED=1 XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.90} $VPY -m trustgate.eval.cli $ATTN_FLAG"
 EOF
 cat "$EXP_DIR/phase1.env"
 

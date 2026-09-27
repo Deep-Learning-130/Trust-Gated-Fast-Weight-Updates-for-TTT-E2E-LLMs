@@ -119,6 +119,42 @@ def test_s4_fails_if_trustgate_appears_in_any_log(tmp_path):
     assert statuses(tmp_path)["S4 gate absent"] == acc.FAIL
 
 
+WANDB_ECHO = (
+    "{'wandb_project': 'ttt-trustgate-session1'}\n"
+    "wandb: View run at: https://wandb.ai/me/ttt-trustgate-session1/runs/abc\n"
+)
+MARKER = acc.INSTRUMENT_MARKER + " -- blocked exact attention serves every call.\n"
+
+
+def test_s4_is_not_tripped_by_the_wandb_project_name(tmp_path):
+    """Before 2026-09-27 `\\btrustgate\\b` matched 'ttt-trustgate-session1' at its
+    hyphens and failed S4 on every clean run."""
+    make_session(tmp_path, extra=WANDB_ECHO)
+    assert statuses(tmp_path)["S4 gate absent"] == acc.PASS
+
+
+def test_s4_allows_the_declared_attention_patch_and_says_so(tmp_path, capsys):
+    tb = '  File "/root/TTT/src/trustgate/attention_patch.py", line 90, in one_block\n'
+    make_session(tmp_path, extra=WANDB_ECHO + MARKER + tb)
+    s = statuses(tmp_path)
+    assert s["S4 gate absent"] == acc.PASS
+    assert s["S4 instrument patch"] == acc.INFO
+    text, code = acc.verdict(acc.evaluate(tmp_path))
+    assert code == 0 and "attention_patch" in text
+
+
+def test_s4_fails_when_only_some_runs_were_patched(tmp_path):
+    make_session(tmp_path)
+    log = tmp_path / "logs" / "eval-2.log"
+    log.write_text(log.read_text(encoding="utf-8") + MARKER, encoding="utf-8")
+    assert statuses(tmp_path)["S4 instrument patch"] == acc.FAIL
+
+
+def test_s4_still_fails_on_the_gate_even_with_the_patch_declared(tmp_path):
+    make_session(tmp_path, extra=MARKER + '  File "/root/TTT/src/trustgate/interceptor.py", line 3\n')
+    assert statuses(tmp_path)["S4 gate absent"] == acc.FAIL
+
+
 def test_missing_logs_are_unverified_everywhere(tmp_path):
     (tmp_path / "logs").mkdir()
     assert acc.main(["--collected", str(tmp_path)]) == 2

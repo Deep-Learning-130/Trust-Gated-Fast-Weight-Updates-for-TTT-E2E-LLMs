@@ -228,6 +228,11 @@ Cheap, and it needs no dataset download.
 `trustgate` module is imported for the whole run. This is the baseline; the overlay must
 not be in it.
 
+> **Revised 2026-09-27** (§8, written before any C1 result): *one* overlay module is allowed,
+> `trustgate.attention_patch`, and only when it announces itself with its marker line in
+> every run of the session. Everything else in the original bar stands: `vendor_patch`,
+> the interceptor and the gate still FAIL S4 on sight. The superseded wording is kept above.
+
 ---
 
 ## 6. Bars for the checkpoints that *do* have published numbers
@@ -297,6 +302,7 @@ with the reason, and leaves the superseded value visible.
 | 2026-08-08 | Initial pre-registration. Nothing observed. | — |
 | 2026-09-16 | **No bar moved.** Scope note: the first 1B baseline will be measured over a *truncated* `/val`. See below. | The 2026-09-14 probe put `/val` at 2.0B tokens; a full pass is ~7.5 GPU-h and bar S2 wants two of them. |
 | 2026-09-16 | **No bar moved.** Default subset lowered from 150M to **50M tokens** (6,103 sequences). See the second note below. | Cost: the session is paid per minute by one person, and the band does not need 150M. |
+| 2026-09-27 | **S4 narrowed** (Manas Maahir): `trustgate.attention_patch` is allowed when declared by its marker in every run. Superseded wording kept in §5. See the note below. | The 125M C1 fits neither the laptop (batch-4 floor OOMs) nor the vendor's cuDNN kernel on a T4 (no engine, any dtype). Written before any C1 result. |
 
 ### 2026-09-16 — measuring the baseline over a subset of `/val`
 
@@ -369,3 +375,43 @@ is the structural bars S1–S4 in section 5, and nothing more.
 **What a 125M PASS establishes:** the harness, the checkpoint restore and the eval path work
 on real released weights. **What it does not establish:** that we reproduce the paper. Nobody
 should quote it as a reproduction. Section 4 stays as the plan of record for a future 1B run.
+
+
+### 2026-09-27 — S4 allows one declared instrument patch
+
+**Written before any C1 result exists.** Decided by Manas Maahir. See
+`experiments/001-attack-spike/PREREGISTERED.md`, revision 2026-09-27.
+
+**Why.** The 125M C1 cannot run as written on any hardware available for free:
+
+- On the laptop, `train.py` floors the eval batch at 4, and at batch 4 one eval step
+  asks for 11.4 GiB. XLA gets that down to 7.4 GiB against a 7.2 GiB card.
+- On a Kaggle T4, the vendor's cuDNN attention has no engine for this graph in bf16 or fp16,
+  with cuDNN 9.8 or 9.26.
+
+**What changes.** The attention is served by `trustgate.attention_patch`. That is exact
+attention computed a block of queries at a time: the same maths as JAX's XLA attention, not
+an approximation. The original S4 forbade *any* `trustgate` import, so the bar is narrowed:
+
+- The patch must print its marker line (`scripts/vendor_train.py`) in **every** run of the
+  session. `check_baseline_acceptance.py` FAILs a session that mixes patched and unpatched
+  runs, because S2 compares two of them.
+- `vendor_patch`, the interceptor and the gate still FAIL S4 on sight. The purpose of S4, that
+  the gate is absent from the baseline, is unchanged.
+- The patch is reported as its own row, and the PASS verdict says attention did not run on
+  the vendor's kernel.
+
+**What it costs, measured before the run** (laptop, where both kernels run;
+`experiments/003-smoke-125m/reference/laptop-cudnn-8192.json`):
+
+- **Kernel:** mean absolute difference 6.2e-5 against outputs of mean magnitude 0.030.
+- **Model:** at most 5.4e-4 nats per chunk over 8 chunks of adaptation.
+- **For scale:** the vendor's own run-to-run jitter is 2.0e-4, and §4.1's band is 0.491 nats.
+
+A host that uses the patch must first pass `run_smoke.py --blocked-attention`, whose
+`matches-vendor-kernel` bar is 5e-3 nats per chunk. That bar was set before any T4 run.
+
+**A bug fixed in the same pass, not a bar change.** S4's `\btrustgate\b` matched the W&B
+project name `ttt-trustgate-session1`, which the vendor prints in its config and in every run
+URL, so S4 would have failed every clean run. The project name no longer counts as the
+overlay.

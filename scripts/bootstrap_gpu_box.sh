@@ -472,7 +472,7 @@ write_eval_cmd() {  # path, exp_name, header, extra hydra overrides...
 # Decision record:          docs/adr/ADR-004-baseline-eval-invocation.md
 # Pre-registered bar:       experiments/000-repro-baseline/TOLERANCE.md
 #
-# The gate must NOT be installed for this run: no trustgate import appears anywhere in it (T1.6).
+# $GATE_NOTE
 #
 # Overrides beyond ADR-004's command, and why:
 #   training.checkpoint_path  -- the vendor builds a SAVING Checkpointer even in eval mode
@@ -514,7 +514,7 @@ export NETRC="$EXP_DIR/bootstrap/wandb.netrc"
 cd "$repo_root/vendor/ttt-e2e"
 
 echo "run log: \$RUN_LOG"
-uv run --no-sync train \\
+uv run --no-sync $TRAIN_CMD \\
   +deploy=interactive \\
   +experiment=$EXPERIMENT \\
   training.eval_mode=true \\
@@ -544,6 +544,21 @@ EOF
   chmod +x "$path"
   echo "    $path"
 }
+
+# BLOCKED_ATTENTION=1: the vendor's cuDNN attention cannot run on this GPU (a Kaggle
+# T4, 2026-09-27), so the eval scripts call scripts/vendor_train.py, which installs
+# trustgate.attention_patch (exact attention, a block of queries at a time) and then
+# runs the same ttt.train:main. TOLERANCE.md S4 revision 2026-09-27 allows exactly
+# that patch and nothing else; check_baseline_acceptance.py reports it as its own row.
+BLOCKED_ATTENTION="${BLOCKED_ATTENTION:-0}"
+case "$BLOCKED_ATTENTION" in
+  0) TRAIN_CMD="train"
+     GATE_NOTE="The gate must NOT be installed for this run: no trustgate import appears anywhere in it (T1.6)." ;;
+  1) TRAIN_CMD="python $repo_root/scripts/vendor_train.py"
+     GATE_NOTE="INSTRUMENT PATCH: trustgate.attention_patch only (BLOCKED_ATTENTION=1; TOLERANCE.md S4 revision 2026-09-27). The gate is NOT installed: no vendor_patch, interceptor or gate import."
+     echo "    attention : BLOCKED (trustgate.attention_patch via scripts/vendor_train.py; S4 revision 2026-09-27)" ;;
+  *) die "BLOCKED_ATTENTION must be 0 or 1, got '$BLOCKED_ATTENTION'" ;;
+esac
 
 SMOKE_CMD="$EXP_DIR/bootstrap/1-smoke-${CKPT}.sh"
 REAL_CMD="$EXP_DIR/bootstrap/2-eval-${CKPT}.sh"
@@ -597,6 +612,7 @@ SMOKE_TOKENS=$SMOKE_TOKENS
 CKPT_MANIFEST=$CKPT_MANIFEST
 LOCAL=$LOCAL
 COMPUTE_DTYPE=$COMPUTE_DTYPE
+BLOCKED_ATTENTION=$BLOCKED_ATTENTION
 EOF
 
 # ------------------------------------------------------------------- done ----

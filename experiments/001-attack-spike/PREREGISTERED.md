@@ -252,3 +252,54 @@ released scale rather than wait.
 - Not the primary metric, the five seeds, the SELECT headline, or the invalidating
   conditions.
 - Not the fluency instrument: an independent reference model, never the victim.
+
+## Revision 2026-09-27 -- the Kaggle fallback cannot run the vendor's kernel, and what replaces it
+
+**Decided by:** Manas Maahir, project owner. **Written before any C1, C2 or C3 result.**
+**This revision moves no bar.** The three PROCEED criteria are unchanged: effect size >= 0.8,
+relative degradation >= 10%, fluency ratio <= 1.5. They are still pinned by
+`tests/test_thresholds.py`.
+
+### What was found (2026-09-27)
+
+- **The named fallback cannot run as written.** On a Kaggle T4 the vendor's cuDNN fused
+  attention (`attention.py:183/214/244/312`) has no engine for this graph in bf16 or fp16,
+  with cuDNN 9.8 or 9.26. fp32 is rejected outright by the kernel. So revision 2026-09-22's
+  "fp32 on a T4" fallback does not exist.
+- **The laptop needs two environment pins, and neither touches the model.**
+  - cuDNN 9.26.0.51 over the vendor lock's 9.8, which has no engine here either.
+  - `XLA_PYTHON_CLIENT_MEM_FRACTION=0.90`.
+  - With both, the 003 smoke passes 7/7 on the vendor's own kernel and loss.
+  - wandb 0.30.0 over the lock's 0.19.9 is needed only to authenticate new-format keys.
+- **C1 does not fit the laptop.** `train.py` floors the eval batch at 4, and one eval step
+  asks for 11.4 GiB, which XLA reduces to 7.4 GiB against 7.2 available. C2-C5 use one
+  sequence at a time and fit.
+
+### What changes
+
+- **Host for C1:** a Kaggle T4, with attention served by `trustgate.attention_patch`. That is
+  exact attention computed a block of queries at a time, the same maths as JAX's XLA attention.
+  C1 runs it through `scripts/vendor_train.py`; `TOLERANCE.md` S4 is narrowed accordingly
+  (its revision 2026-09-27).
+- **Measured before any run** on the laptop, where both kernels run:
+  - kernel: mean absolute difference 6.2e-5 against outputs averaging 0.030;
+  - full model: at most 5.4e-4 nats per chunk over 8 chunks of adaptation;
+  - for scale: the vendor's run-to-run jitter is 2.0e-4, the S1-S4 gate has no numeric bar
+    at 125M, and TOLERANCE's 1B band is 0.491 nats wide.
+- **Gate on any host that uses the patch:** `run_smoke.py --blocked-attention` must pass
+  `matches-vendor-kernel` (at most 5e-3 nats per chunk against the laptop's cuDNN numbers for
+  the same seeded model and tokens) before any session step runs there. The bar was set
+  before any T4 run.
+- **Dtype on the T4:** the vendor's bf16 first, which XLA computes on Turing without bf16
+  hardware. fp32 only if bf16 fails the smoke test, recorded as in revision 2026-09-22.
+- **No comparison mixes hosts or kernels.** Every run inside 000 (smoke, both S2 runs, the
+  control) uses one host and one kernel, and so does every arm, seed and control inside 001.
+  The host and kernel of each experiment go in its session summary and every report's victim
+  label (`[blocked_attention]`).
+
+### What this does not change
+
+- No threshold, in either direction.
+- Not the primary metric, the five seeds, the SELECT headline, the invalidating conditions,
+  or the fluency instrument.
+- Not revision 2026-09-22's asymmetry: a 125M STOP still ends the project.

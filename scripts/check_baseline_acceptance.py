@@ -11,6 +11,8 @@ Rule 5). It exists so the verdict is not assembled by eye on a billing clock.
     S3    (s5)    dummy_dataset=true lands far above the band    control
     S4    (s5)    resolved config says dataset_name books3, and
                   no trustgate module appears anywhere in the run   all logs
+                  -- except trustgate.attention_patch, declared by its
+                  marker line and present in every run (revision 2026-09-27)
     s4.3          2.60..2.70 -- non-binding expectation, reported only
 
 Two readings are made explicit here rather than left to whoever runs it:
@@ -62,6 +64,26 @@ LOSS_LINE = re.compile(r"Eval -- train_holdout/loss:\s*(?P<v>[-+]?(?:\d+\.?\d*(?
 DATASET_NAME = re.compile(r"""['"]dataset_name['"]\s*:\s*['"](?P<v>[^'"]+)['"]""")
 DATASET_PATH = re.compile(r"""['"]dataset_path['"]\s*:\s*['"](?P<v>[^'"]+)['"]""")
 TRUSTGATE = re.compile(r"\btrustgate\b")
+#: "trustgate" that is not the overlay: the W&B project, printed in the vendor's
+#: config echo and in every run URL. `\b` matches at its hyphens, so before
+#: 2026-09-27 this failed S4 on every run, clean ones included.
+NOT_THE_OVERLAY = re.compile(r"ttt-trustgate-session\w*")
+#: The one overlay module TOLERANCE.md S4 allows since its 2026-09-27 revision,
+#: and only when it announces itself. Keep in sync with scripts/vendor_train.py.
+INSTRUMENT_MARKER = "INSTRUMENT PATCH: trustgate.attention_patch installed"
+ALLOWED_PATCH = re.compile(r"trustgate[./\\]attention_patch\b|from trustgate import attention_patch")
+
+
+def overlay_mentions(text: str) -> list[str]:
+    """Lines naming the trustgate overlay, other than what S4 allows."""
+    found = []
+    for line in text.splitlines():
+        rest = NOT_THE_OVERLAY.sub("", line)
+        if INSTRUMENT_MARKER in rest:
+            continue
+        if TRUSTGATE.search(ALLOWED_PATCH.sub("", rest)):
+            found.append(line.strip()[:120])
+    return found
 
 PASS, FAIL, UNVERIFIED, INFO = "PASS", "FAIL", "UNVERIFIED", "INFO"
 
@@ -169,12 +191,24 @@ def evaluate(collected: Path, checkpoint: str = CKPT_1B) -> list[tuple[str, str,
     smoke = read_log(collected, "smoke")
     if smoke is not None:
         all_logs["smoke"] = smoke
-    hits = [n for n, t in all_logs.items() if TRUSTGATE.search(t)]
+    hits = {n: m for n, t in all_logs.items() if (m := overlay_mentions(t))}
     if not all_logs:
         rows.append(("S4 gate absent", UNVERIFIED, "no logs"))
     else:
         rows.append(("S4 gate absent", FAIL if hits else PASS,
-                     f"'trustgate' found in: {hits}" if hits else f"no 'trustgate' in {sorted(all_logs)}"))
+                     f"trustgate overlay in: {{{', '.join(f'{n}: {m[0]!r}' for n, m in hits.items())}}}"
+                     if hits else f"no trustgate overlay in {sorted(all_logs)}"))
+        # TOLERANCE.md S4 revision 2026-09-27: blocked attention is allowed, declared,
+        # and must be the same condition in every run -- S2 compares two of them.
+        patched = sorted(n for n, t in all_logs.items() if INSTRUMENT_MARKER in t)
+        if patched and patched != sorted(all_logs):
+            rows.append(("S4 instrument patch", FAIL,
+                         f"attention_patch in {patched} but not in {sorted(set(all_logs) - set(patched))}: "
+                         "mixed conditions"))
+        elif patched:
+            rows.append(("S4 instrument patch", INFO,
+                         "attention served by trustgate.attention_patch in every run, not the vendor's "
+                         "cuDNN kernel (TOLERANCE.md S4 revision 2026-09-27)"))
 
     # s4.3, non-binding, and a 1B expectation only
     if has_band and l1 is not None and math.isfinite(l1):
@@ -194,10 +228,12 @@ def verdict(rows: list[tuple[str, str, str]], checkpoint: str = CKPT_1B) -> tupl
     if UNVERIFIED in statuses:
         missing = [n for n, s, _ in rows if s == UNVERIFIED]
         return f"NOT YET PASS -- unverified: {', '.join(missing)}. Record each gap in the Outcome.", 2
+    patched = any(n == "S4 instrument patch" for n, _, _ in rows)
+    note = " Attention ran on trustgate.attention_patch, not the vendor's cuDNN kernel." if patched else ""
     if checkpoint != CKPT_1B:
         return ("PASS -- S1-S4 (TOLERANCE.md s5) met. This checkpoint has no numeric bar (s6): "
-                "the harness works on real weights; this is not a reproduction."), 0
-    return "PASS -- all bars in TOLERANCE.md s4.1 and s5 met.", 0
+                "the harness works on real weights; this is not a reproduction." + note), 0
+    return "PASS -- all bars in TOLERANCE.md s4.1 and s5 met." + note, 0
 
 
 def main(argv: list[str] | None = None) -> int:

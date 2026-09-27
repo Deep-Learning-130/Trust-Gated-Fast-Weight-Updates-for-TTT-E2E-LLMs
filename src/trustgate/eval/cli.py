@@ -182,6 +182,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--blocked-attention",
+        action="store_true",
+        help=(
+            "Serve every attention call with trustgate.attention_patch (exact attention, a "
+            "block of queries at a time) instead of the vendor's cuDNN kernel, which has no "
+            "engine on a Turing T4 (Kaggle, 2026-09-27). Measured against cuDNN on the laptop: "
+            "up to 5.4e-4 nats per chunk over 8 chunks of adaptation. Recorded in the label."
+        ),
+    )
+    parser.add_argument(
         "--chunked-ce",
         action="store_true",
         help=(
@@ -934,6 +944,13 @@ def _build_victim(args, *, tag: str):
         # A dtype change alters the run condition, so it travels with the label
         # into every report rather than living only in a shell history.
         label = f"{label} [compute_dtype={compute_dtype}]"
+    if getattr(args, "blocked_attention", False):
+        # Before `bind`, for the same reason as the loss patch below. Every
+        # attention call in the victim is traced after this.
+        from trustgate.attention_patch import install_blocked_attention
+
+        install_blocked_attention()
+        label = f"{label} [blocked_attention]"
     if getattr(args, "chunked_ce", False):
         # Before `bind`: the binding's step functions trace `MetaModel.lm_loss`
         # on first use, so the patch has to be in place before anything runs.

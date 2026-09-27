@@ -311,6 +311,32 @@ def check_chunked_ce(c, cfg, model, state, mesh, tol_nats=1e-3):
         c.fail(detail + " -- outside the bar", **obs)
 
 
+REFERENCE = Path(__file__).resolve().parent / "reference" / "laptop-cudnn-8192.json"
+
+
+@check(
+    "matches-vendor-kernel",
+    "With --blocked-attention the vendor's cuDNN attention is not running, so this "
+    "run's numbers are only as good as their agreement with it. The reference is the "
+    "same seeded model and tokens on the vendor kernel (laptop, 2026-09-27).",
+)
+def check_matches_vendor_kernel(c, per_chunk, tol_nats=5e-3):
+    """Bar set 2026-09-27 BEFORE any T4 run: 5e-3 nats per chunk, 1% of
+    TOLERANCE.md's 0.491-nat band and ~9x the 5.4e-4 blocked-vs-cuDNN gap on the
+    laptop, leaving room for a T4's different bf16 arithmetic. Do not widen it
+    after seeing a result; find out why instead."""
+    ref = json.loads(REFERENCE.read_text(encoding="utf-8"))["cudnn_per_chunk"]
+    if len(per_chunk) != len(ref):
+        c.fail(f"{len(per_chunk)} chunks vs the reference's {len(ref)}: not the same geometry")
+        return
+    gaps = [p - r for p, r in zip(per_chunk, ref)]
+    worst = max(abs(g) for g in gaps)
+    detail = (f"max |this run - laptop cuDNN| {worst:.3e} nats per chunk (bar {tol_nats:g}); "
+              f"gaps [{', '.join(f'{g:+.1e}' for g in gaps)}]")
+    obs = dict(per_chunk_gap=gaps, max_abs_gap_nats=worst, reference=str(REFERENCE.name))
+    (c.ok if worst <= tol_nats else c.fail)(detail if worst <= tol_nats else detail + " -- outside the bar", **obs)
+
+
 @check(
     "param-count",
     "A mismatch means the config that built this model is not the config the "
@@ -559,6 +585,13 @@ def main():
         "qk_norm runs at param_dtype and promotes xq back up. Recorded.",
     )
     ap.add_argument(
+        "--blocked-attention",
+        action="store_true",
+        help="Serve attention with trustgate.attention_patch instead of the vendor's "
+        "cuDNN kernel (for GPUs where cuDNN has no engine: a Kaggle T4). Adds "
+        "matches-vendor-kernel, which compares against the laptop's cuDNN numbers.",
+    )
+    ap.add_argument(
         "--chunked-ce",
         action="store_true",
         help="Check trustgate.memory_patch against the vendor's lm_loss on this "
@@ -601,11 +634,19 @@ def main():
         )
         return 2
 
+    if args.blocked_attention:
+        from trustgate.attention_patch import install_blocked_attention
+
+        install_blocked_attention()
+        print("attention: trustgate.attention_patch (blocked exact attention), NOT the vendor's cuDNN kernel")
+
     cfg = build_config(args)
     model, state, mesh = build_model(cfg)
 
     # On the vendor's own lm_loss: the reference every later number rests on.
     check_random_init_loss(cfg, model, state, mesh)
+    if args.blocked_attention and args.seq_length == 8192:
+        check_matches_vendor_kernel(CHECKS[-1].observed.get("per_chunk_nats", []))
     if args.chunked_ce:
         # Compares the two on this model and leaves the patch installed, before
         # `bind` traces anything, for every check below.
@@ -713,6 +754,7 @@ def main():
                     "compute_dtype": args.compute_dtype or "bf16 (config default)",
                     "param_dtype": args.param_dtype or "fp32 (config default)",
                     "chunked_ce": bool(args.chunked_ce),
+                    "blocked_attention": bool(args.blocked_attention),
                     "code_revision": code_revision(),
                     "suffix_len": suffix_len,
                 },
