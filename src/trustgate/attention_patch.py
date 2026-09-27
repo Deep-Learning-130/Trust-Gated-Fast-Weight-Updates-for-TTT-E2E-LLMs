@@ -53,6 +53,31 @@ def _block_size(t: int, target: int = QUERY_BLOCK) -> int:
     return 1
 
 
+def dot_precision(dtype, device=None):
+    """The dot algorithm JAX's XLA attention asks for, where the device has it.
+
+    JAX requests BF16_BF16_F32 (F16_F16_F32) and wraps the request in a bare
+    `except` to fall back. On a Turing T4 the refusal surfaces at execution
+    ("UNIMPLEMENTED: Unsupported algorithm ... ALG_DOT_BF16_BF16_F32", Kaggle
+    2026-09-27), long after that `except` has passed, so the fallback never runs.
+    Below Ampere there is no bf16 hardware to ask for, so ask for nothing: XLA
+    then upcasts the bf16 operands to f32, where a bf16 x bf16 product is exact
+    and the sum accumulates in f32 -- the arithmetic the preset names anyway.
+    """
+    if dtype == jnp.bfloat16:
+        preset = jax.lax.DotAlgorithmPreset.BF16_BF16_F32
+    elif dtype == jnp.float16:
+        preset = jax.lax.DotAlgorithmPreset.F16_F16_F32
+    else:
+        return None
+    device = device if device is not None else jax.devices()[0]
+    if device.platform == "gpu":
+        major = int(str(getattr(device, "compute_capability", "0")).split(".")[0] or 0)
+        if major < 8:
+            return None
+    return preset
+
+
 def _to_4d(x):
     return x if x is None or x.ndim == 4 else x.reshape((1,) * (4 - x.ndim) + x.shape)
 
@@ -84,12 +109,7 @@ def blocked_attention(
     m4 = _to_4d(mask)
 
     logits_dtype = jnp.promote_types(q.dtype, jnp.float32)
-    if q.dtype == jnp.bfloat16:
-        precision = jax.lax.DotAlgorithmPreset.BF16_BF16_F32
-    elif q.dtype == jnp.float16:
-        precision = jax.lax.DotAlgorithmPreset.F16_F16_F32
-    else:
-        precision = None
+    precision = dot_precision(q.dtype)
     large_negative = jnp.asarray(-0.7 * jnp.finfo(logits_dtype).max, dtype=logits_dtype)
 
     tb = _block_size(T, query_block)

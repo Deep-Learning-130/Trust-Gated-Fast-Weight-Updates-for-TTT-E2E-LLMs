@@ -102,6 +102,25 @@ def test_install_serves_cudnn_requests_and_uninstall_restores():
     assert not attention_patch.is_installed()
 
 
+class _Device:
+    def __init__(self, platform, cc=None):
+        self.platform = platform
+        if cc is not None:
+            self.compute_capability = cc
+
+
+def test_no_bf16_dot_algorithm_is_requested_below_ampere():
+    """A T4 (sm 7.5) refuses ALG_DOT_BF16_BF16_F32 at execution (Kaggle, 2026-09-27)."""
+    from trustgate.attention_patch import dot_precision
+
+    t4, laptop, cpu = _Device("gpu", "7.5"), _Device("gpu", "8.6"), _Device("cpu")
+    assert dot_precision(jnp.bfloat16, t4) is None
+    assert dot_precision(jnp.float16, t4) is None
+    assert dot_precision(jnp.bfloat16, laptop) == jax.lax.DotAlgorithmPreset.BF16_BF16_F32
+    assert dot_precision(jnp.bfloat16, cpu) == jax.lax.DotAlgorithmPreset.BF16_BF16_F32
+    assert dot_precision(jnp.float32, laptop) is None
+
+
 def test_vendor_attention_call_sites_are_the_ones_covered():
     """Tripwire for a submodule bump: a new call shape would not be covered by
     the tests above. Re-read attention.py before trusting the patch if this fails."""
