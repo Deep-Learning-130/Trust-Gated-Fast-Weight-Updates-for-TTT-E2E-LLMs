@@ -176,8 +176,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Override the vendor's model.compute_dtype (default: the vendor's own, "
-            "bf16). Pass fp32 on a Turing card (T4: Kaggle, Colab free), which has no "
-            "native bf16. Recorded in the victim label, so the report shows it."
+            "bf16). fp32 cannot run this model on any card: the prefix blocks force "
+            "cuDNN fused attention, which takes fp16/bf16 only and needs Ampere or "
+            "newer (003 smoke, a7447ce). Recorded in the victim label."
+        ),
+    )
+    parser.add_argument(
+        "--no-chunked-ce",
+        dest="chunked_ce",
+        action="store_false",
+        help=(
+            "Use the vendor's MetaModel.lm_loss as-is instead of trustgate.memory_patch, "
+            "which computes the same loss a slice of tokens at a time so a [1024, 128256] "
+            "logit array never exists (needed on an 8 GB card). The patched run is "
+            "recorded in the victim label."
         ),
     )
     parser.add_argument(
@@ -920,6 +932,13 @@ def _build_victim(args, *, tag: str):
         # A dtype change alters the run condition, so it travels with the label
         # into every report rather than living only in a shell history.
         label = f"{label} [compute_dtype={compute_dtype}]"
+    if getattr(args, "chunked_ce", True):
+        # Before `bind`: the binding's step functions trace `MetaModel.lm_loss`
+        # on first use, so the patch has to be in place before anything runs.
+        from trustgate.memory_patch import install_chunked_ce
+
+        install_chunked_ce()
+        label = f"{label} [chunked_ce]"
 
     _VICTIM_SCOPE.enter_context(mesh)
     mini_batch = int(cfg.model.mini_batch_size)

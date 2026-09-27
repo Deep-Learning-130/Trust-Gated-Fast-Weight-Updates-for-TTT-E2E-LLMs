@@ -93,11 +93,29 @@ def check(name: str, why: str):
             except Exception as exc:  # noqa: BLE001 - a failed check is data
                 c.fail(f"{type(exc).__name__}: {exc}")
                 c.observed["traceback"] = traceback.format_exc()
+            c.observed.update(gpu_memory())
             return c
 
         return run
 
     return decorate
+
+
+def gpu_memory() -> dict:
+    """Device memory after a check, so an OOM names the check that caused it.
+
+    `peak_bytes_in_use` is the process-lifetime peak, not per-check: a check
+    that raises it is the one that set a new high. Empty on backends that do not
+    report (CPU).
+    """
+    try:
+        import jax
+
+        stats = jax.devices()[0].memory_stats() or {}
+    except Exception:  # noqa: BLE001 - never fail a check over its telemetry
+        return {}
+    keys = ("peak_bytes_in_use", "bytes_in_use", "bytes_limit")
+    return {f"gpu_{k}": int(stats[k]) for k in keys if k in stats}
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +243,66 @@ def check_random_init_loss(c, cfg, model, state, mesh, tol=0.05):
         c.ok(detail, **obs)
     else:
         c.fail(detail + " -- chunk 0 outside tolerance", **obs)
+
+
+@check(
+    "chunked-ce-equivalence",
+    "trustgate.memory_patch replaces the vendor's lm_loss so the 8 GB card fits. "
+    "If it does not reproduce the vendor's numbers on the real model, every "
+    "later measurement is of a different computation.",
+)
+def check_chunked_ce(c, cfg, model, state, mesh, tol_nats=1e-3):
+    """Run the whole 8-chunk meta-learning pass twice on one sequence: vendor
+    `lm_loss`, then the sliced one. The inner loop trains on this loss, so a
+    difference in its gradients would show up as drift across the chunks.
+
+    The bar, 1e-3 nats per chunk, was set before this ran on a GPU. It is ~500x
+    below TOLERANCE.md's 0.491-nat band. On CPU the two agree to ~1e-7
+    (tests/test_memory_patch.py); what is left on a GPU is GEMM tiling of a
+    128-row vs a 1024-row bf16 matmul. If this fails, find out why -- do not
+    widen it.
+    """
+    import jax.numpy as jnp
+
+    from trustgate import memory_patch
+    from trustgate.eval import vendor_bind
+    from ttt.model.transformer import MetaModel
+
+    M = MetaModel.MetricType
+    seq = vendor_bind.make_batch(
+        dummy_tokens(cfg.training.seq_length + 1, seed=0),
+        bos_token_id=cfg.model.bos_token_id,
+    )
+
+    def run():
+        with mesh:
+            _, metrics = model.loss_for_sequence(seq, state)
+        return (
+            jnp.asarray(metrics[M.loss], dtype=jnp.float32).ravel(),
+            jnp.asarray(metrics[M.token_nll_loss], dtype=jnp.float32).ravel(),
+        )
+
+    memory_patch.uninstall_chunked_ce()
+    vendor_loss, vendor_nll = run()
+    memory_patch.install_chunked_ce()
+    sliced_loss, sliced_nll = run()
+
+    loss_gap = float(jnp.max(jnp.abs(sliced_loss - vendor_loss)))
+    nll_gap = float(jnp.max(jnp.abs(sliced_nll - vendor_nll)))
+    detail = (
+        f"max |sliced - vendor| per-chunk loss {loss_gap:.3e} nats, "
+        f"per-token NLL {nll_gap:.3e} (bar {tol_nats:g} on the per-chunk loss)"
+    )
+    obs = dict(
+        per_chunk_loss_gap=loss_gap,
+        per_token_nll_gap=nll_gap,
+        vendor_per_chunk=[float(x) for x in vendor_loss],
+        sliced_per_chunk=[float(x) for x in sliced_loss],
+    )
+    if loss_gap <= tol_nats:
+        c.ok(detail, **obs)
+    else:
+        c.fail(detail + " -- outside the bar", **obs)
 
 
 @check(
@@ -474,6 +552,14 @@ def main():
         "attention kernel still reports float32 with compute_dtype at bf16: "
         "qk_norm runs at param_dtype and promotes xq back up. Recorded.",
     )
+    ap.add_argument(
+        "--no-chunked-ce",
+        dest="chunked_ce",
+        action="store_false",
+        help="Run every check on the vendor's own lm_loss instead of "
+        "trustgate.memory_patch. The default checks the patch against the vendor "
+        "first (chunked-ce-equivalence), then keeps it for the checks after.",
+    )
     ap.add_argument("--exp-dir", default="/tmp/trustgate-smoke")
     ap.add_argument("--out", default=str(RESULTS / "smoke.json"))
     args = ap.parse_args()
@@ -513,7 +599,12 @@ def main():
     cfg = build_config(args)
     model, state, mesh = build_model(cfg)
 
+    # On the vendor's own lm_loss: the reference every later number rests on.
     check_random_init_loss(cfg, model, state, mesh)
+    if args.chunked_ce:
+        # Compares the two on this model and leaves the patch installed, before
+        # `bind` traces anything, for every check below.
+        check_chunked_ce(cfg, model, state, mesh)
 
     from trustgate.eval import vendor_bind
     from trustgate.eval.harness import RunCondition, eval_tokens_digest
@@ -571,6 +662,11 @@ def main():
     for c in CHECKS:
         mark = "PASS" if c.passed else "FAIL"
         print(f"[{mark}] {c.name}: {c.detail}")
+        if "gpu_peak_bytes_in_use" in c.observed:
+            print(
+                f"       gpu peak so far {c.observed['gpu_peak_bytes_in_use'] / 2**30:.2f} GiB, "
+                f"in use {c.observed.get('gpu_bytes_in_use', 0) / 2**30:.2f} GiB"
+            )
         if not c.passed:
             print(f"       why it matters: {c.why}")
 
@@ -597,6 +693,7 @@ def main():
                     "mini_batch_size": binding.mini_batch_size,
                     "compute_dtype": args.compute_dtype or "bf16 (config default)",
                     "param_dtype": args.param_dtype or "fp32 (config default)",
+                    "chunked_ce": bool(args.chunked_ce),
                     "code_revision": code_revision(),
                     "suffix_len": binding.suffix_len,
                 },
