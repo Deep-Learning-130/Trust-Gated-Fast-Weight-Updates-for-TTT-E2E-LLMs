@@ -23,10 +23,17 @@ empty key that version skips the check and reads the environment, and
 `wandb.init`'s backend reads the netrc. So this checks the route the box uses,
 for old and new keys alike.
 
-Pin the vendor's wandb version so the check exercises the same client code:
+Correction, 2026-09-27: under 0.19.9 that route fails for new keys. The empty
+key reaches `wandb.Api(api_key="")`, which treats "" as a given key instead of
+falling back to WANDB_API_KEY, and the vendor's `api.runs` query returns 401 --
+while `wandb.init` succeeds, which is what made it look like a bad key. The box
+now runs wandb 0.30.0 over the lock (bootstrap_gpu_box.sh, Step 2), which has
+no 40-character check and falls back on `if api_key:`.
+
+Pin the box's wandb version so the check exercises the same client code:
 
     WANDB_ENTITY=... WANDB_PROJECT=... WANDB_KEY=... \\
-        uv run --no-project --with wandb==0.19.9 python scripts/preflight_wandb.py
+        uv run --no-project --with wandb==0.30.0 python scripts/preflight_wandb.py
 """
 
 from __future__ import annotations
@@ -81,9 +88,11 @@ def main() -> int:
 def _check(entity: str, project: str, key: str) -> int:
     import wandb
 
-    print(f"wandb client {wandb.__version__} (vendor lock: 0.19.9)")
-    if wandb.__version__ != "0.19.9":
-        print("WARNING: not the vendor's version; run with `uv run --no-project --with wandb==0.19.9`")
+    # 0.30.0, not the vendor lock's 0.19.9: bootstrap_gpu_box.sh installs it over the
+    # lock, because 0.19.9 cannot authenticate wandb_v1_ keys through wandb.Api.
+    print(f"wandb client {wandb.__version__} (the box runs 0.30.0; vendor lock 0.19.9)")
+    if wandb.__version__ != "0.30.0":
+        print("WARNING: not the box's version; run with `uv run --no-project --with wandb==0.30.0`")
 
     try:
         n = vendor_query(wandb, entity, project, key, EXP_NAMES[0])

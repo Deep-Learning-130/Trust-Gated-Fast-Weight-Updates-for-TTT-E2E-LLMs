@@ -316,6 +316,19 @@ CUDNN_PIN="${CUDNN_PIN:-9.26.0.51}"
   || die "could not install nvidia-cudnn-cu12==$CUDNN_PIN over the lock's 9.8"
 echo "    cudnn     : nvidia-cudnn-cu12==$CUDNN_PIN (lock pins 9.8.0.87; see comment)"
 
+# wandb, overriding the lock too. 0.19.9 predates W&B's 86-character wandb_v1_
+# keys: wandb.login(key=...) rejects anything but 40 characters, so the eval
+# scripts pass training.wandb_key EMPTY -- and then wandb.Api(api_key="") treats
+# "" as a given key rather than falling back to WANDB_API_KEY, and every run dies
+# with a 401 at wandb_utils.py:62-63 (observed on the laptop, 2026-09-27). The
+# vendor's config types wandb_key as `str`, so null is not an option. 0.30.0 has
+# no 40-character check and falls back on `if api_key:`, so the same empty key
+# works. The vendor's calls (Settings, login, Api.runs, init) keep their shape.
+WANDB_PIN="${WANDB_PIN:-0.30.0}"
+( cd vendor/ttt-e2e && uv pip install -q --python .venv/bin/python "wandb==$WANDB_PIN" ) \
+  || die "could not install wandb==$WANDB_PIN over the lock's 0.19.9"
+echo "    wandb     : $WANDB_PIN (lock pins 0.19.9; see comment)"
+
 # Not just `import ttt`: prove JAX sees a CUDA device AND can compile and run a
 # kernel on it. This is where a driver/CUDA mismatch surfaces, in minutes, rather
 # than an hour in at the first eval batch.
