@@ -584,6 +584,23 @@ So even the ~3–4 GB CLI-path figure is unproven at 8192. **Rerun 003 and the r
 **Still an estimate.** `run_gpu_session.sh` samples `nvidia-smi` every 5 s. Record the peak here
 after the smoke phase, the same way §9.4.1 asks.
 
+**Measured 2026-09-27: the 003 smoke passes 7/7 on this laptop, vendor loss unmodified.** The
+setup was random-init 125M, seq 8192, bf16, 2-sequence stream (16 inner steps). The JAX peak
+was **5.82 GiB**, with `carry-is-non-trivial` the high-water mark. Two things had to change,
+and neither touches the model or the computation:
+
+1. **`XLA_PYTHON_CLIENT_MEM_FRACTION=0.90`.** With preallocation off, JAX still caps itself
+   at 75%: 6.0 GiB of 8. At that cap `carry-is-non-trivial` died asking for one 2.57 GiB
+   block. 0.90 rather than 0.92 because Windows holds ~680 MiB of the card.
+2. **cuDNN 9.26.0.51 over the lock's 9.8.0.87.** 9.8 has no engine for the prefix
+   sliding-window fused attention on SM86 ("No valid engine configs"), the same error the
+   T4 gave. `bootstrap_gpu_box.sh` Step 2 now installs it, and every later `uv run` is
+   `--no-sync` so the lock cannot revert it.
+
+The "1.9 GB allocation" OOM described above, and the Sept 15 NaN, were a 4096-token run on an
+older revision. `trustgate.memory_patch` (sliced LM loss) exists as an opt-in fallback. It
+was not needed here.
+
 **Wall time.** Roughly the same as 1B on an A100, possibly 1.5× that: 125M is about 8× less
 compute, and the laptop card is about 10–15× slower. C2 measures it. C3–C5 resume after a crash,
 which covers laptop sleep and thermal throttling.

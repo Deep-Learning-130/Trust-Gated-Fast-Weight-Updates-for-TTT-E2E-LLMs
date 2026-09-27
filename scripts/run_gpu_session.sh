@@ -208,7 +208,7 @@ python3 "$repo_root/scripts/collect_results.py" --src "$OUT" --dest "$DEST" \
 set +e
 # The vendor env, because S1 reads the .npy and the system python3 may lack numpy.
 # That env has no trustgate package at all, which is itself part of S4.
-( cd "$repo_root/vendor/ttt-e2e" && uv run --exact python "$repo_root/scripts/check_baseline_acceptance.py" \
+( cd "$repo_root/vendor/ttt-e2e" && uv run --no-sync python "$repo_root/scripts/check_baseline_acceptance.py" \
     --collected "$DEST" --checkpoint "$CKPT" --out "$DEST/ACCEPTANCE.txt" )
 verdict=$?
 set -e

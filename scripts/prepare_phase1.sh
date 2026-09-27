@@ -22,9 +22,10 @@
 # Every step is idempotent. It ends with "Phase 1 prep complete" or stops at the
 # first failure.
 #
-# Note: run_gpu_session.sh's acceptance step uses `uv run --exact`, which strips
-# packages not in the vendor lock. Re-running 000 after this script removes the
-# two fluency packages again; re-run this script afterwards.
+# Note: every `uv run` in these scripts is `--no-sync`. It used to be `--exact`,
+# which re-synced to the vendor lock: it stripped the two fluency packages this
+# script installs AND reverted bootstrap's cuDNN 9.26 pin to the lock's 9.8, which
+# cannot run the prefix attention (bootstrap_gpu_box.sh, Step 2).
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -121,7 +122,7 @@ export DTYPE_FLAG="${COMPUTE_DTYPE:+--compute-dtype $COMPUTE_DTYPE}"
 export CKPT_DEST="$CKPT_DEST"
 export CKPT_MANIFEST="$CKPT_MANIFEST"
 # Unbuffered, so the timing lines reach the tee'd log as they happen.
-export TG="env PYTHONPATH=$repo_root/src PYTHONUNBUFFERED=1 XLA_PYTHON_CLIENT_PREALLOCATE=false $VPY -m trustgate.eval.cli"
+export TG="env PYTHONPATH=$repo_root/src PYTHONUNBUFFERED=1 XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.90} $VPY -m trustgate.eval.cli"
 EOF
 cat "$EXP_DIR/phase1.env"
 

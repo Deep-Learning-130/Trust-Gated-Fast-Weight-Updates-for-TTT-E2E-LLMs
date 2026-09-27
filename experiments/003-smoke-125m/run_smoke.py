@@ -40,6 +40,12 @@ sys.path.insert(0, str(ROOT / "src"))
 # per chunk, and value_and_grad holds more than one).
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
+# Preallocation off does NOT lift JAX's cap: the allocator still stops at 75% of
+# the card, 6.0 GiB of 8. Observed 2026-09-27 on the laptop: carry-is-non-trivial
+# OOMed on the vendor's own loss at that cap, and passed at 0.90 with a 5.82 GiB
+# peak. 0.90 rather than more because Windows holds ~680 MiB of the same card.
+os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.90")
+
 # This run is single-device by construction: n_data_parallel=1 and
 # n_state_parallel=1 below, and `ModelSharding.__init__` (sharding.py:33-35)
 # asserts their product equals `jax.device_count()`. On any box with more than
@@ -553,12 +559,11 @@ def main():
         "qk_norm runs at param_dtype and promotes xq back up. Recorded.",
     )
     ap.add_argument(
-        "--no-chunked-ce",
-        dest="chunked_ce",
-        action="store_false",
-        help="Run every check on the vendor's own lm_loss instead of "
-        "trustgate.memory_patch. The default checks the patch against the vendor "
-        "first (chunked-ce-equivalence), then keeps it for the checks after.",
+        "--chunked-ce",
+        action="store_true",
+        help="Check trustgate.memory_patch against the vendor's lm_loss on this "
+        "model (chunked-ce-equivalence), then keep it for the checks after. Off by "
+        "default: the vendor's own loss fits 8 GB at a 0.90 memory fraction.",
     )
     ap.add_argument("--exp-dir", default="/tmp/trustgate-smoke")
     ap.add_argument("--out", default=str(RESULTS / "smoke.json"))
@@ -654,6 +659,20 @@ def main():
     # the carry check meant an 8 GB box spent its last free bytes proving the
     # forward pass was reproducible and then had nothing left for the check the
     # whole experiment exists for.
+    #
+    # And it runs with nothing else resident. Observed 2026-09-27 on the laptop:
+    # after the carry checks, 5.70 GiB was still held by the model, the binding
+    # and the adapted carry, and determinism's own build OOMed on top of it. It
+    # needs none of them -- it builds its own models from `cfg`.
+    mini_batch_size, suffix_len = binding.mini_batch_size, binding.suffix_len
+    del model, state, binding, adapted
+    gc.collect()
+    # `del` alone left 4.75 GiB in use on the same box: compiled executables in
+    # jax's caches keep the arrays they closed over alive.
+    import jax
+
+    jax.clear_caches()
+    gc.collect()
     check_determinism(cfg, mesh)
 
     # ---- report ----
@@ -690,12 +709,12 @@ def main():
                 "config": {
                     "seq_length": args.seq_length,
                     "stream_sequences": args.stream_sequences,
-                    "mini_batch_size": binding.mini_batch_size,
+                    "mini_batch_size": mini_batch_size,
                     "compute_dtype": args.compute_dtype or "bf16 (config default)",
                     "param_dtype": args.param_dtype or "fp32 (config default)",
                     "chunked_ce": bool(args.chunked_ce),
                     "code_revision": code_revision(),
-                    "suffix_len": binding.suffix_len,
+                    "suffix_len": suffix_len,
                 },
                 "checks": [
                     {

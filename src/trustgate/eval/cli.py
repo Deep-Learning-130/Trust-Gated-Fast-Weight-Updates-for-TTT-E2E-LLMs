@@ -182,14 +182,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--no-chunked-ce",
-        dest="chunked_ce",
-        action="store_false",
+        "--chunked-ce",
+        action="store_true",
         help=(
-            "Use the vendor's MetaModel.lm_loss as-is instead of trustgate.memory_patch, "
-            "which computes the same loss a slice of tokens at a time so a [1024, 128256] "
-            "logit array never exists (needed on an 8 GB card). The patched run is "
-            "recorded in the victim label."
+            "Replace the vendor's MetaModel.lm_loss with trustgate.memory_patch, which "
+            "computes the loss a slice of tokens at a time so no [1024, 128256] logit "
+            "array exists. OFF by default: the vendor's own loss fits the 8 GB laptop "
+            "once XLA_PYTHON_CLIENT_MEM_FRACTION is 0.90 (003 smoke, 7/7, 2026-09-27). "
+            "Equal at initialisation, but the adaptation trajectory differs by up to "
+            "~2.5e-3 nats per chunk, ~10x the vendor's own run-to-run jitter. Use it only "
+            "if a run cannot fit otherwise; it is recorded in the victim label."
         ),
     )
     parser.add_argument(
@@ -932,7 +934,7 @@ def _build_victim(args, *, tag: str):
         # A dtype change alters the run condition, so it travels with the label
         # into every report rather than living only in a shell history.
         label = f"{label} [compute_dtype={compute_dtype}]"
-    if getattr(args, "chunked_ce", True):
+    if getattr(args, "chunked_ce", False):
         # Before `bind`: the binding's step functions trace `MetaModel.lm_loss`
         # on first use, so the patch has to be in place before anything runs.
         from trustgate.memory_patch import install_chunked_ce

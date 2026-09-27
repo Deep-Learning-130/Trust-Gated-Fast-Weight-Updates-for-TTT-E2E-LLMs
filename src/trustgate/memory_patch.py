@@ -33,10 +33,21 @@ Faithfully kept, because a result is only as good as its equivalence:
   `promote_dtype` to `compute_dtype` (`transformer.py:822-828`), or `lm_head`
   when embeddings are untied.
 
-The only residual difference is GEMM rounding: a 128-row matmul may be tiled
-differently from a 1024-row one. In fp32 on CPU the two agree to ~1e-6
-(`tests/test_memory_patch.py`); on the GPU at bf16 the smoke run measures the
-gap on the real model (`chunked-ce-equivalence`) rather than asserting it.
+The residual difference is GEMM rounding: a 128-row matmul is tiled differently
+from a 1024-row one. Measured, not assumed:
+
+- CPU, fp32 and jitted bf16: loss, per-token NLL and gradients agree with the
+  vendor's own `loss.py` to ~1e-6 (`tests/test_memory_patch.py`).
+- RTX 3070 Ti, bf16, real 125M model (003 smoke, 2026-09-27): chunk 0, before
+  any adaptation, agrees to ~1e-6 nats. After inner steps the trajectories part
+  by up to ~2.5e-3 nats per chunk -- about 10x the vendor's own run-to-run
+  jitter (2e-4), because each inner step trains on slightly differently rounded
+  bf16 gradients. That failed the 1e-3 bar set before the run.
+
+**Status: opt-in, not the default.** The same smoke run passed 7/7 on the
+vendor's unmodified loss once `XLA_PYTHON_CLIENT_MEM_FRACTION` was 0.90 -- the
+out-of-memory that motivated this module was JAX's default 75% cap, not the
+card. Keep this for a run that genuinely cannot fit, and record its use.
 
 Installed the same way as `vendor_patch.install_gate` -- by replacing the class
 attribute, because the inner step reaches the loss as `MetaModel.lm_loss`

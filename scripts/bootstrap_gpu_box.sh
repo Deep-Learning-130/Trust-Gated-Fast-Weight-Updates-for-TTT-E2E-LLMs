@@ -302,11 +302,25 @@ fi
 say "Step 2 — vendor environment (uv sync --frozen)"
 ( cd vendor/ttt-e2e && uv sync --frozen )
 
+# cuDNN, overriding the lock. The lock pins nvidia-cudnn-cu12 9.8.0.87, which has
+# no engine for the prefix blocks' sliding-window fused attention: "No valid
+# engine configs for Matmul_MUL_GEN_INDEX..." on the SM86 laptop (2026-09-27),
+# the same error Kaggle's T4 gave. 9.26.0.51 -- what an unlocked install resolves
+# to, and what the 2026-09-15 laptop run had -- executes it, with jax unchanged at
+# the lock's 0.5.3. Environment only; no vendor file changes (ADR-002).
+#
+# Everything after this runs `uv run --no-sync`, never `--exact`: `--exact`
+# re-syncs to the lock and would silently put 9.8 back.
+CUDNN_PIN="${CUDNN_PIN:-9.26.0.51}"
+( cd vendor/ttt-e2e && uv pip install -q --python .venv/bin/python "nvidia-cudnn-cu12==$CUDNN_PIN" ) \
+  || die "could not install nvidia-cudnn-cu12==$CUDNN_PIN over the lock's 9.8"
+echo "    cudnn     : nvidia-cudnn-cu12==$CUDNN_PIN (lock pins 9.8.0.87; see comment)"
+
 # Not just `import ttt`: prove JAX sees a CUDA device AND can compile and run a
 # kernel on it. This is where a driver/CUDA mismatch surfaces, in minutes, rather
 # than an hour in at the first eval batch.
 say "Step 3 — import check and GPU compute check"
-( cd vendor/ttt-e2e && uv run --exact python - <<'PY'
+( cd vendor/ttt-e2e && uv run --no-sync python - <<'PY'
 import ttt  # noqa: F401
 import jax
 import jax.numpy as jnp
@@ -405,7 +419,7 @@ ENVREC="$EXP_DIR/bootstrap/env-record.txt"
   echo "ckpt_manifest:  $(grep -m1 'manifest_sha256' "$CKPT_MANIFEST" 2>/dev/null | awk '{print $3}' || echo n/a)"
   echo "uv:             $(uv --version 2>/dev/null || echo n/a)"
   echo "nvidia-smi:     $(nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>/dev/null | head -1 || echo n/a)"
-  ( cd vendor/ttt-e2e && uv run --exact python -c \
+  ( cd vendor/ttt-e2e && uv run --no-sync python -c \
       "import jax; print('jax:            '+jax.__version__); print('jax_devices:    '+str(jax.devices()))" \
     ) 2>/dev/null || echo "jax:            n/a"
 } > "$ENVREC"
@@ -466,8 +480,9 @@ mkdir -p "\$(dirname "\$RUN_LOG")"
 export PYTHONUNBUFFERED=1
 # JAX preallocates 75% of the card by default. On an 8 GB card (LOCAL=1) that pool
 # is too small for the 125M eval, so the fraction is raised; a rented box keeps
-# JAX's default. Override per run by exporting it.
-export XLA_PYTHON_CLIENT_MEM_FRACTION="\${XLA_PYTHON_CLIENT_MEM_FRACTION:-$( [[ "$LOCAL" == "1" ]] && echo 0.92 || echo 0.75 )}"
+# JAX's default. Override per run by exporting it. 0.90, not 0.92: Windows holds
+# ~680 MiB of the laptop card, so 0.92 of 8 GiB asks for more than is free.
+export XLA_PYTHON_CLIENT_MEM_FRACTION="\${XLA_PYTHON_CLIENT_MEM_FRACTION:-$( [[ "$LOCAL" == "1" ]] && echo 0.90 || echo 0.75 )}"
 
 # The key goes in through the environment and a private netrc, and
 # training.wandb_key is passed EMPTY. wandb 0.19.9 (the vendor lock) raises
@@ -482,7 +497,7 @@ export NETRC="$EXP_DIR/bootstrap/wandb.netrc"
 cd "$repo_root/vendor/ttt-e2e"
 
 echo "run log: \$RUN_LOG"
-uv run --exact train \\
+uv run --no-sync train \\
   +deploy=interactive \\
   +experiment=$EXPERIMENT \\
   training.eval_mode=true \\
