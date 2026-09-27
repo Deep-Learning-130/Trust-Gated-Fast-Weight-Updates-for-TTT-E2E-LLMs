@@ -53,14 +53,11 @@ EXP_NAMES = (
 )
 
 
-#: What the generated eval scripts pass as `training.wandb_key`.
-VENDOR_KEY_ARG = ""
-
-
 def vendor_query(wandb, entity: str, project: str, key: str, exp_name: str) -> int:
-    """wandb_utils.py:61-64, verbatim in effect, with the box's empty key argument."""
-    wandb.login(key=VENDOR_KEY_ARG)
-    api = wandb.Api(api_key=VENDOR_KEY_ARG)
+    """wandb_utils.py:61-64, verbatim in effect. The box passes the real key: the
+    eval scripts hand the vendor training.wandb_key='${oc.env:WANDB_API_KEY}'."""
+    wandb.login(key=key)
+    api = wandb.Api(api_key=key)
     runs = api.runs(f"{entity}/{project}", filters={"display_name": exp_name})
     return len(runs)
 
@@ -102,11 +99,11 @@ def _check(entity: str, project: str, key: str) -> int:
         print(f"creating {entity}/{project} with the run below, then retrying")
 
     # Always, not only on a missing project: the box's first 000 run calls
-    # wandb.init with the same empty key, and that is the path that needs the
-    # netrc. One tiny run named `preflight`; its local files go to a temp dir.
+    # wandb.init with the same key argument, and under wandb 0.30.0 an empty one
+    # fails right here ("user is not logged in"). One tiny run named `preflight`; its local files go to a temp dir.
     try:
         run = wandb.init(entity=entity, project=project, name="preflight", dir=tempfile.gettempdir(),
-                         settings=wandb.Settings(api_key=VENDOR_KEY_ARG, entity=entity, project=project))
+                         settings=wandb.Settings(api_key=key, entity=entity, project=project))
         run.log({"preflight": 1})
         run.finish()
         print("wandb.init OK (the path the box's first 000 run takes)")

@@ -318,7 +318,7 @@ echo "    cudnn     : nvidia-cudnn-cu12==$CUDNN_PIN (lock pins 9.8.0.87; see com
 
 # wandb, overriding the lock too. 0.19.9 predates W&B's 86-character wandb_v1_
 # keys: wandb.login(key=...) rejects anything but 40 characters, so the eval
-# scripts pass training.wandb_key EMPTY -- and then wandb.Api(api_key="") treats
+# scripts passed training.wandb_key EMPTY -- and then wandb.Api(api_key="") treats
 # "" as a given key rather than falling back to WANDB_API_KEY, and every run dies
 # with a 401 at wandb_utils.py:62-63 (observed on the laptop, 2026-09-27). The
 # vendor's config types wandb_key as `str`, so null is not an option. 0.30.0 has
@@ -497,12 +497,14 @@ export PYTHONUNBUFFERED=1
 # ~680 MiB of the laptop card, so 0.92 of 8 GiB asks for more than is free.
 export XLA_PYTHON_CLIENT_MEM_FRACTION="\${XLA_PYTHON_CLIENT_MEM_FRACTION:-$( [[ "$LOCAL" == "1" ]] && echo 0.90 || echo 0.75 )}"
 
-# The key goes in through the environment and a private netrc, and
-# training.wandb_key is passed EMPTY. wandb 0.19.9 (the vendor lock) raises
-# "API key must be 40 characters long" in wandb.login(key=...), and W&B now issues
-# 86-character wandb_v1_ keys. With an empty key that version skips the check and
-# reads WANDB_API_KEY; wandb.init's backend reads the netrc (without it, it panics).
-# Works unchanged for old 40-character keys, and keeps the key off the command line.
+# The key goes in through the environment and a private netrc, and reaches the
+# vendor as training.wandb_key='\${oc.env:WANDB_API_KEY}' -- an OmegaConf reference,
+# so the command line, ps and hydra's saved overrides carry that literal text, never
+# the key. (It used to be passed EMPTY, for wandb 0.19.9's 40-character check; with
+# wandb 0.30.0 an empty key breaks wandb.init instead, which copies the explicit ""
+# into the run's settings -- 2026-09-27.) The vendor's cfg_dict is resolved
+# (train.py:79), so the key does reach the private W&B run config, as the vendor
+# designed, and collect_results.py redacts it from every local copy.
 export WANDB_API_KEY="\$WANDB_KEY"
 export NETRC="$EXP_DIR/bootstrap/wandb.netrc"
 ( umask 077; printf 'machine api.wandb.ai\n  login user\n  password %s\n' "\$WANDB_KEY" > "\$NETRC" )
@@ -526,7 +528,7 @@ uv run --no-sync train \\
   backend.compilation_cache_dir=$CACHE_DIR \\
   training.wandb_entity=$WANDB_ENTITY \\
   training.wandb_project=$WANDB_PROJECT \\
-  training.wandb_key= $* 2>&1 | tee "\$RUN_LOG"
+  training.wandb_key='\${oc.env:WANDB_API_KEY}' $* 2>&1 | tee "\$RUN_LOG"
 
 # A zero exit with no loss line is not a result.
 if ! grep -q "Eval -- train_holdout/loss:" "\$RUN_LOG"; then
