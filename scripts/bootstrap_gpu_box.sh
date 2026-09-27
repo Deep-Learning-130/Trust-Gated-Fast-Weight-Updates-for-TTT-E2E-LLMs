@@ -504,7 +504,9 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION="\${XLA_PYTHON_CLIENT_MEM_FRACTION:-$( [[ 
 # wandb 0.30.0 an empty key breaks wandb.init instead, which copies the explicit ""
 # into the run's settings -- 2026-09-27.) The vendor's cfg_dict is resolved
 # (train.py:79), so the key does reach the private W&B run config, as the vendor
-# designed, and collect_results.py redacts it from every local copy.
+# designed, and collect_results.py redacts it from every local copy. The vendor also
+# PRINTS that resolved config at startup, so the output is piped through sed before
+# it reaches the terminal or the log (a key was printed in full, 2026-09-27).
 export WANDB_API_KEY="\$WANDB_KEY"
 export NETRC="$EXP_DIR/bootstrap/wandb.netrc"
 ( umask 077; printf 'machine api.wandb.ai\n  login user\n  password %s\n' "\$WANDB_KEY" > "\$NETRC" )
@@ -528,7 +530,8 @@ uv run --no-sync train \\
   backend.compilation_cache_dir=$CACHE_DIR \\
   training.wandb_entity=$WANDB_ENTITY \\
   training.wandb_project=$WANDB_PROJECT \\
-  training.wandb_key='\${oc.env:WANDB_API_KEY}' $* 2>&1 | tee "\$RUN_LOG"
+  training.wandb_key='\${oc.env:WANDB_API_KEY}' $* 2>&1 \
+  | sed -u "s|\$WANDB_API_KEY|[REDACTED-WANDB-KEY]|g" | tee "\$RUN_LOG"
 
 # A zero exit with no loss line is not a result.
 if ! grep -q "Eval -- train_holdout/loss:" "\$RUN_LOG"; then
